@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AI HELPER</string>
+    <string name="auto_trading_service_description">AI 자동매매 서비스 - 백그라운드에서 자동으로 주식 매매를 수행합니다</string>
+
+    <string name="auto_trading_channel_name">자동매매 서비스</string>
+    <string name="auto_trading_channel_description">AI 자동매매 서비스 알림</string>
+    <string name="auto_trading_notification_title">🤖 AI 자동매매</string>
+    <string name="auto_trading_notification_content">자동매매가 실행 중입니다 (5분마다 체크)</string>
+</resources>

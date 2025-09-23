@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- SplashScreen과 동일한 블루 그라디언트 배경 -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:type="linear"
+                android:angle="270"
+                android:startColor="#0D47A1"  <!-- Colors.blue[900] -->
+                android:centerColor="#1565C0" <!-- Colors.blue[800] -->
+                android:endColor="#1976D2"    <!-- Colors.blue[700] -->
+            />
+        </shape>
+    </item>
+
+    <!-- 중앙 로고 (앱 아이콘 사용) -->
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@mipmap/launcher_icon" />
+    </item>
+</layer-list>

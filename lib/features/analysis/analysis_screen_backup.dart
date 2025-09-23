@@ -1,0 +1,6501 @@
+import 'package:flutter/material.dart';
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+import '../../core/api/kis_unified_api_service.dart';
+import '../../core/analysis/unified_analysis_service.dart';
+import '../../core/analysis/technical_indicators.dart';
+import '../../core/data/app_data_manager.dart';
+import '../../core/data/unified_stock_data_manager.dart';
+import '../../core/trading/investment_style_manager.dart';
+import '../../core/trading/investment_style.dart';
+import '../../core/widgets/gradient_app_bar.dart';
+import '../../core/utils/formatters.dart';
+import '../../core/database/repositories/watchlist_repository.dart';
+import '../../core/config/api_config.dart';
+import 'package:intl/intl.dart';
+// import '../../core/trading/auto_trading_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/services.dart';
+import '../../core/trading/style_based_trading_service.dart';
+import '../../core/services/signal_tracker.dart';
+import '../../core/services/trade_status_tracker.dart' show TradeStatusTracker, TradeStatus;
+import '../../core/services/local_notification_manager.dart';
+import '../../core/database/repositories/notification_history_repository.dart';
+import '../../core/trading/market_time_validator.dart';
+import '../../core/database/database_helper.dart';
+import '../../core/database/repositories/realtime_data_repository.dart';
+import '../../core/database/repositories/historical_data_repository.dart';
+import '../../core/services/recommended_stocks_service.dart';
+import 'stock_price_dialog.dart';
+import '../trading/recommended_stocks_screen.dart';
+
+class AnalysisScreen extends StatefulWidget {
+  const AnalysisScreen({super.key});
+
+  @override
+  State<AnalysisScreen> createState() => _AnalysisScreenState();
+}
+
+class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStateMixin {
+  // KisApiService 제거됨 - KisUnifiedApiService 사용
+  final KisUnifiedApiService _unifiedApiService = KisUnifiedApiService();
+  final UnifiedAnalysisService _unifiedAnalysis = UnifiedAnalysisService.instance;
+  final InvestmentStyleManager _styleManager = InvestmentStyleManager();
+  final UnifiedStockDataManager _unifiedDataManager = UnifiedStockDataManager.instance;
+  bool _isAutoTradingEnabled = false;
+  
+  // 탭 컨트롤러
+  late TabController _tabController;
+  
+  // 데이터 상태
+  List<Map<String, dynamic>> _watchlistItems = [];
+  List<Map<String, dynamic>> _holdingsItems = [];
+  List<Map<String, dynamic>> _recommendedStocks = [];
+  Map<String, Map<String, dynamic>> _currentPrices = {};
+  Map<String, Map<String, dynamic>> _analysisResults = {};
+  
+  // 캐시된 실시간 데이터
+  Map<String, Map<String, dynamic>> _watchlistDataCache = {};
+  Map<String, Map<String, dynamic>> _holdingsDataCache = {};
+  Map<String, Map<String, dynamic>> _recommendedStocksCache = {};
+  
+  // UI 상태
+  bool _isLoading = true;
+  bool _isFirstLoading = true; // 첫 진입 로딩 상태 유지
+  bool _isSelectionMode = false;
+  Set<String> _selectedItems = {};
+  bool _needsRefresh = false; // UI 강제 새로고침 플래그
+  
+  // AI 추천 분석 진행률 상태
+  bool _isAnalyzingRecommendedStocks = false;
+  int _currentProgress = 0;
+  int _totalProgress = 0;
+  String _currentAnalyzingSymbol = '';
+  String _currentAnalyzingName = '';
+  
+  // 실시간 분석 타이머 (차트 데이터 포함)
+  Timer? _analysisTimer;
+  static const Duration _analysisInterval = Duration(minutes: 1); // 3분으로 변경 (차트 데이터 조회)
+  
+  // 빠른 업데이트 타이머 (현재가만)
+  Timer? _quickUpdateTimer;
+  static const Duration _quickUpdateInterval = Duration(seconds: 5); // 5초마다 현재가만 업데이트
+  
+  // 데이터 정리 타이머
+  Timer? _cleanupTimer;
+  static const Duration _cleanupInterval = Duration(hours: 1); // 1시간마다 데이터 정리
+  
+  // 현재 투자 스타일
+  InvestmentStyle _currentStyle = InvestmentStyle.moderate;
+  
+  // 투자 스타일 변경 리스너
+  StreamSubscription? _styleSubscription;
+  
+  // 관심종목 변경 리스너
+  StreamSubscription? _watchlistChangeSubscription;
+  
+  // 거래 상태 추적기
+  final TradeStatusTracker _tradeStatusTracker = TradeStatusTracker();
+  StreamSubscription? _tradeStatusSubscription;
+  
+  // 시그널 시간 추적
+  Map<String, DateTime> _signalTimestamps = {};
+  Map<String, String> _lastSignals = {};
+  // 최근 주문 시도 시간 (중복 방지)
+  final Map<String, DateTime> _lastTradeAttemptTimes = {};
+  
+  // 커스터마이징 모드 상태
+  bool _isCustomMode = false;
+  
+  // 스크롤 위치 유지를 위한 컨트롤러들
+  final ScrollController _watchlistScrollController = ScrollController();
+  final ScrollController _holdingsScrollController = ScrollController();
+  final ScrollController _analysisScrollController = ScrollController();
+
+  // 안전 변환 유틸
+  double _toDouble(dynamic v, [double def = 0.0]) {
+    if (v == null) return def;
+    if (v is num) return v.toDouble();
+    if (v is String) {
+      final p = double.tryParse(v.trim());
+      return p ?? def;
+    }
+    return def;
+  }
+
+  int _toInt(dynamic v, [int def = 0]) {
+    if (v == null) return def;
+    if (v is num) return v.toInt();
+    if (v is String) {
+      final pi = int.tryParse(v.trim());
+      if (pi != null) return pi;
+      final pd = double.tryParse(v.trim());
+      return pd != null ? pd.toInt() : def;
+    }
+    return def;
+  }
+  
+  // 스크롤 위치 저장
+  double _watchlistScrollOffset = 0.0;
+  double _holdingsScrollOffset = 0.0;
+  double _analysisScrollOffset = 0.0;
+  
+  final DatabaseHelper _databaseHelper = DatabaseHelper();
+  final RealtimeDataRepository _realtimeDataRepository = RealtimeDataRepository();
+  final HistoricalDataRepository _historicalDataRepository = HistoricalDataRepository();
+  
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 4, vsync: this);
+    
+    // 스크롤 리스너 제거(일반 스크롤로 단순화하여 버벅임 방지)
+    
+    // 초기화
+    _initializeData();
+    _loadAutoTradingStatus();
+    
+    // 전달받은 탭 인덱스가 있으면 해당 탭으로 이동
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final args = ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
+      if (args != null && args['initialTab'] != null) {
+        final initialTab = args['initialTab'] as int;
+        if (initialTab >= 0 && initialTab < 4) {
+          _tabController.animateTo(initialTab);
+        }
+      }
+    });
+    
+    // 탭 변경 리스너 추가
+    _tabController.addListener(() {
+      // 탭이 변경되면 선택 모드 초기화
+      if (_isSelectionMode && mounted) {
+        setState(() {
+          _isSelectionMode = false;
+          _selectedItems.clear();
+        });
+      }
+      // 추천종목 탭은 더 이상 AnalysisScreen에서 데이터 로드/스캔을 수행하지 않음
+      // 호출 로직 제거: UI만 유지
+    });
+    
+    // 투자 스타일 변경 스트림 구독
+    _styleSubscription = _styleManager.styleStream.listen((newStyle) {
+      print('🔄 투자 스타일 변경 감지: ${_getStyleName(newStyle)}');
+      if (mounted) {
+        setState(() {
+          _currentStyle = newStyle;
+        });
+        // 스타일 변경 시 즉시 분석 재실행
+        _refreshAllAnalysis();
+      }
+    });
+    
+    // 커스터마이징 모드 변경 스트림 구독
+    _styleManager.customModeStream.listen((isCustom) {
+      print('🔄 커스터마이징 모드 변경 감지: ${isCustom ? "사용자 커스터마이징" : "AI 최적화"}');
+      if (mounted) {
+        // 모드 변경 시 즉시 분석 재실행
+        _refreshAllAnalysis();
+      }
+    });
+    
+    // 스타일 설정 변경 스트림 구독
+    _styleManager.styleSettingsStream.listen((settings) {
+      print('🔄 스타일 설정 변경 감지: ${settings['style_name']}');
+      if (mounted) {
+        // 설정 변경 시 즉시 분석 재실행
+        _refreshAllAnalysis();
+      }
+    });
+    
+    // 관심종목 변경 스트림 구독
+    _watchlistChangeSubscription = AppDataManager.instance.watchlistChangeStream.listen((newWatchlist) {
+      print('🔄 관심종목 변경 감지 (Stream): ${newWatchlist.length}개');
+      if (mounted) {
+        setState(() {
+          _watchlistItems = newWatchlist;
+        });
+        // 새로운 종목들 즉시 분석
+        _analyzeNewWatchlistItems(newWatchlist);
+      }
+    });
+    
+    // 거래 상태 변경 리스너 추가
+    _tradeStatusSubscription = _tradeStatusTracker.statusChangeStream.listen((_) {
+      if (mounted) {
+        setState(() {
+          // UI 새로고침
+        });
+      }
+    });
+    
+    _startRealTimeAnalysis();
+    _startQuickUpdateTimer();
+    _startCleanupTimer();
+    // 추천종목 자동 업데이트는 전용 화면에서만 수행 (중복/깜빡임 방지)
+    // _startRecommendedStocksUpdateTimer();
+    _startWatchlistChangeDetection();
+    _subscribeToAutoTradingAnalysis();
+  }
+
+
+
+  /// 투자 스타일 로드
+  Future<void> _loadInvestmentStyle() async {
+    try {
+      // InvestmentStyleManager에서 현재 스타일 로드
+      _currentStyle = _styleManager.currentStyle;
+      print('✅ 투자 스타일 로드: $_currentStyle (${_getStyleName(_currentStyle)})');
+    } catch (e) {
+      print('❌ 투자 스타일 로드 실패: $e');
+      // 기본값으로 moderate 설정
+      _currentStyle = InvestmentStyle.moderate;
+    }
+  }
+
+  @override
+  void dispose() {
+    _analysisTimer?.cancel();
+    _quickUpdateTimer?.cancel();
+    _cleanupTimer?.cancel();
+    _tabController.dispose();
+    _styleSubscription?.cancel();
+    _watchlistChangeSubscription?.cancel();
+    _tradeStatusSubscription?.cancel();
+    _watchlistScrollController.dispose();
+    _holdingsScrollController.dispose();
+    _analysisScrollController.dispose();
+    super.dispose();
+  }
+
+  /// 데이터 초기화 (성능 최적화)
+  Future<void> _initializeData() async {
+    print('🚀 데이터 초기화 시작...');
+    if (mounted) {
+      setState(() {
+        _isFirstLoading = true;
+        _isLoading = true;
+      });
+    }
+
+    try {
+      // 1. 캐시된 데이터 우선 로드 (빠른 UI 표시)
+      await _loadDataFromCache();
+      
+      if (mounted) {
+        setState(() {
+          _isFirstLoading = false;
+        });
+      }
+      
+      // 2. 백그라운드에서 나머지 데이터 로드
+      Future.microtask(() async {
+        try {
+          // 현재 투자 스타일 로드
+          _currentStyle = _styleManager.currentStyle;
+          print('✅ 투자 스타일 로드: $_currentStyle');
+          
+          // 거래 상태 로드 및 동기화
+          await _tradeStatusTracker.loadTradeStatuses();
+          await _tradeStatusTracker.syncTradeStatusesFromHistory();
+          
+          // 3. 최신 데이터 로딩
+          await _loadLatestData();
+          
+          // 4. 추천종목 데이터는 탭 변경 시에만 로드 (성능 최적화)
+          // await _loadRecommendedStocksData();
+          
+          // 6. 초기 분석 수행 (백그라운드)
+          await _performInitialAnalysis();
+          
+          print('✅ 백그라운드 데이터 초기화 완료');
+          print('📊 최종 데이터 상태:');
+          print('  - 관심종목: ${_watchlistItems.length}개');
+          print('  - 보유종목: ${_holdingsItems.length}개');
+          // 첫 진입 로딩은 이미 완료됨
+          
+        } catch (e) {
+          print('❌ 백그라운드 데이터 초기화 실패: $e');
+        } finally {
+          if (mounted) {
+            setState(() {
+              _isLoading = false;
+            });
+          }
+        }
+      });
+      
+    } catch (e) {
+      print('❌ 데이터 초기화 실패: $e');
+      if (mounted) {
+        setState(() {
+          _isFirstLoading = false;
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  /// 최신 데이터 로딩 (백그라운드) - 보유종목 덮어쓰기 방지
+  Future<void> _loadLatestData() async {
+    try {
+      print('📡 최신 데이터 로딩 시작');
+      
+      // 1. 현재 보유종목 상태 백업
+      final currentHoldings = List<Map<String, dynamic>>.from(_holdingsItems);
+      print('📊 현재 보유종목 백업: ${currentHoldings.length}개');
+      
+      // 2. 관심종목만 새로고침 (보유종목은 건드리지 않음)
+      await _refreshWatchlistData();
+      
+      // 3. UI 갱신 (보유종목은 기존 데이터 유지)
+      if (mounted) {
+        final watchlist = await AppDataManager.instance.getWatchlist();
+        
+        setState(() {
+          _watchlistItems = watchlist;
+          // 보유종목은 기존 데이터 유지 (덮어쓰기 방지)
+          _holdingsItems = currentHoldings;
+        });
+      }
+      
+      print('✅ 최신 데이터 로딩 완료 (보유종목 덮어쓰기 방지)');
+      print('📊 최종 데이터 상태:');
+      print('  - 관심종목: ${_watchlistItems.length}개');
+      print('  - 보유종목: ${_holdingsItems.length}개');
+      
+    } catch (e) {
+      print('❌ 최신 데이터 로딩 실패: $e');
+    }
+  }
+
+  /// 관심종목 데이터 새로고침
+  Future<void> _refreshWatchlistData() async {
+    try {
+      // 관심종목 데이터 새로고침 로직
+      // AppDataManager에서 직접 관심종목 데이터 가져오기
+      final watchlist = await AppDataManager.instance.getWatchlist();
+      if (mounted) {
+        setState(() {
+          _watchlistItems = watchlist;
+        });
+      }
+    } catch (e) {
+      print('❌ 관심종목 새로고침 실패: $e');
+    }
+  }
+
+  /// 보유종목 데이터 새로고침 (덮어쓰기 방지)
+  Future<void> _refreshHoldingsData() async {
+    try {
+      print('🔄 보유종목 데이터 새로고침 시작...');
+      
+      // 현재 보유종목이 이미 있으면 덮어쓰지 않음
+      if (_holdingsItems.isNotEmpty) {
+        print('📊 현재 보유종목이 이미 있음: ${_holdingsItems.length}개 (덮어쓰기 방지)');
+        return;
+      }
+      
+      // AppDataManager의 메모리에 있는 최신 보유종목 데이터 사용
+      final holdings = AppDataManager.instance.positions;
+      print('📊 AppDataManager 메모리 보유종목: ${holdings.length}개');
+      
+      if (mounted) {
+        setState(() {
+          _holdingsItems = List.from(holdings);
+        });
+      }
+      
+      // 보유종목 상세 정보 출력
+      for (int i = 0; i < holdings.length; i++) {
+        final item = holdings[i];
+        final stockCode = item['stockCode'] as String? ?? '';
+        final stockName = item['stockName'] as String? ?? '';
+        final quantity = item['quantity'] as int? ?? 0;
+        final isOverseas = _isNasdaqStock(stockCode);
+        print('📊 보유종목 $i: $stockCode ($stockName) - ${quantity}주 ${isOverseas ? '(해외)' : '(국내)'}');
+      }
+      
+      print('✅ 보유종목 데이터 새로고침 완료: ${holdings.length}개');
+    } catch (e) {
+      print('❌ 보유종목 새로고침 실패: $e');
+    }
+  }
+
+  /// 추천종목 데이터 로드
+  Future<void> _loadRecommendedStocksData() async {
+    // 호출 로직 제거: AnalysisScreen에서는 추천 데이터를 로드하지 않음
+    if (mounted) {
+      setState(() {
+        _isAnalyzingRecommendedStocks = false;
+      });
+    }
+  }
+
+  /// 🧪 테스트 분석 (001340, 096770만)
+  Future<void> _testAnalysis() async {
+    try {
+      print('🧪 [분석탭] 테스트 분석 시작: 001340, 096770, 112040');
+      
+      // 테스트용 종목 정보
+      final testStocks = [
+        {'code': '112040', 'name': '위메이드'},
+      ];
+      
+      // 각 종목 분석
+      for (final stock in testStocks) {
+        final code = stock['code']!;
+        final name = stock['name']!;
+        
+        print('🧪 [분석탭] $code ($name) 분석 중...');
+        
+        try {
+          // 1. 실시간 현재가 데이터 수집 및 캐시
+          print('🔍 [AnalysisScreen] 테스트 분석 - 현재가 데이터 수집 시작: $code');
+          final currentPriceData = await _collectAndCacheCurrentPriceData(code);
+          if (currentPriceData == null) {
+            print('❌ 테스트 분석 - 현재가 데이터 수집 실패 ($code)');
+            continue;
+          }
+          print('✅ [AnalysisScreen] 테스트 분석 - 현재가 데이터 수집 완료: $code');
+          print('📊 [AnalysisScreen] 테스트 분석 - 수집된 데이터: $currentPriceData');
+
+          // 2. 차트 데이터 수집 및 캐시
+          final chartData = await _collectAndCacheChartData(code);
+          if (chartData.isEmpty) {
+            print('⚠️ 테스트 분석 - 차트 데이터 없음 ($code) - 기본값으로 분석 진행');
+          }
+
+          // 3. UnifiedAnalysisService를 통해 분석 (추천종목과 동일한 로직)
+          final analysisResult = await _unifiedAnalysis.analyzeStock(
+            code,
+            currentPrice: _toDouble(currentPriceData['prpr']),
+            prevClose: _toDouble(currentPriceData['stck_prdy_clpr']),
+            volume: _toDouble(currentPriceData['acml_vol']),
+            highPrice: _toDouble(currentPriceData['high']),
+            lowPrice: _toDouble(currentPriceData['low']),
+            openPrice: _toDouble(currentPriceData['open']),
+            investmentStyle: _currentStyle,
+          );
+          
+          if (analysisResult != null) {
+            final score = analysisResult['comprehensiveScore'] ?? 0.0;
+            final price = analysisResult['currentPrice'] ?? 0.0;
+            final market = analysisResult['market'] ?? 'UNKNOWN';
+            
+            print('✅ [분석탭] $code 분석 완료:');
+            print('  - 종목명: $name');
+            print('  - 종합점수: ${score.toStringAsFixed(3)}');
+            print('  - 현재가: $price');
+            print('  - 시장: $market');
+            print('  - 개별지표: ${analysisResult['individualScores']?.keys.toList() ?? []}');
+            
+            // 분석 결과를 _analysisResults에 저장 (UI에서 확인 가능)
+            _analysisResults[code] = analysisResult;
+            
+          } else {
+            print('❌ [분석탭] $code 분석 결과 없음');
+          }
+        } catch (e) {
+          print('❌ [분석탭] $code 분석 실패: $e');
+        }
+        
+        // 잠시 대기
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+      
+      print('🧪 [분석탭] 테스트 분석 완료');
+      
+      // UI 업데이트
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('🧪 테스트 분석 완료: ${testStocks.length}개 종목'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+      
+    } catch (e) {
+      print('❌ [분석탭] 테스트 분석 실패: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ 테스트 분석 실패: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    }
+  }
+
+
+
+  /// 캐시된 데이터에서 로드 (완전한 API 조회 후 화면 업데이트)
+  Future<void> _loadDataFromCache() async {
+    try {
+      print('📋 캐시된 데이터에서 로드 시작...');
+      
+      // 1. 관심종목 데이터 로드 (캐시 여부와 관계없이 항상 로드)
+      final watchlistRepository = AppDataManager.instance.watchlistRepository;
+      final watchlist = await watchlistRepository.getWatchlistWithStockInfo();
+      if (mounted) {
+        setState(() {
+          _watchlistItems = watchlist;
+        });
+      }
+      print('✅ 관심종목 데이터 로드 완료: ${watchlist.length}개');
+      
+      // 2. 캐시된 관심종목 실시간 데이터
+      final cachedWatchlistData = AppDataManager.instance.getCachedWatchlistData();
+      if (cachedWatchlistData.isNotEmpty) {
+        print('📊 캐시된 관심종목 실시간 데이터: ${cachedWatchlistData.length}개');
+        // 캐시된 실시간 데이터 저장 (API에서 반환하는 타입 그대로 사용)
+        _watchlistDataCache = Map<String, Map<String, dynamic>>.from(
+          cachedWatchlistData.map((key, value) => MapEntry(key, Map<String, dynamic>.from(value)))
+        );
+        print('✅ 캐시된 관심종목 실시간 데이터 로드 완료');
+      }
+      
+      // 3. 캐시된 보유종목 실시간 데이터
+      final cachedHoldingsData = AppDataManager.instance.getCachedHoldingsData();
+      if (cachedHoldingsData.isNotEmpty) {
+        print('📊 캐시된 보유종목 실시간 데이터: ${cachedHoldingsData.length}개');
+        // 캐시된 실시간 데이터 저장 (API에서 반환하는 타입 그대로 사용)
+        _holdingsDataCache = Map<String, Map<String, dynamic>>.from(
+          cachedHoldingsData.map((key, value) => MapEntry(key, Map<String, dynamic>.from(value)))
+        );
+        print('✅ 캐시된 보유종목 실시간 데이터 로드 완료');
+      }
+      
+      // 4. 보유종목은 완전한 API 조회로 처리 (캐시 사용 안함)
+      print('🔄 보유종목 완전 API 조회 시작...');
+      await _loadHoldings();
+      
+      print('✅ 캐시된 데이터 로드 완료');
+      print('📊 최종 데이터 상태:');
+      print('  - 관심종목: ${_watchlistItems.length}개');
+      print('  - 보유종목: ${_holdingsItems.length}개');
+      
+    } catch (e) {
+      print('❌ 캐시된 데이터 로드 실패: $e');
+      // 캐시 로드 실패 시 일반 로드로 폴백
+      await _loadWatchlist();
+      await _loadHoldings();
+    }
+  }
+
+  /// 실시간 분석 시작
+  void _startRealTimeAnalysis() {
+    _analysisTimer?.cancel();
+    _analysisTimer = Timer.periodic(_analysisInterval, (timer) {
+      _performRealTimeAnalysis();
+    });
+    print('🔄 실시간 분석 타이머 시작 (3분 간격 - 차트 데이터 포함)');
+  }
+
+  /// 추천종목 업데이트 타이머 시작
+  void _startRecommendedStocksUpdateTimer() {
+    Timer.periodic(const Duration(minutes: 5), (timer) {
+      _updateRecommendedStocks();
+    });
+    print('⭐ 추천종목 업데이트 타이머 시작 (5분 간격)');
+  }
+
+  /// 추천종목 업데이트
+  Future<void> _updateRecommendedStocks() async {
+    try {
+      if (_analysisResults.isNotEmpty && _currentPrices.isNotEmpty) {
+        await _loadRecommendedStocksData();
+        print('✅ 추천종목 업데이트 완료');
+      }
+    } catch (e) {
+      print('❌ 추천종목 업데이트 실패: $e');
+    }
+  }
+
+  /// 빠른 업데이트 타이머 시작 (현재가만)
+  void _startQuickUpdateTimer() {
+    _quickUpdateTimer?.cancel();
+    _quickUpdateTimer = Timer.periodic(_quickUpdateInterval, (timer) {
+      _performQuickPriceUpdate();
+    });
+    print('⚡ 빠른 업데이트 타이머 시작 (5초 간격 - 현재가만)');
+  }
+
+  /// 데이터 정리 타이머 시작
+  void _startCleanupTimer() {
+    _cleanupTimer?.cancel();
+    _cleanupTimer = Timer.periodic(_cleanupInterval, (timer) {
+      _performDataCleanup();
+    });
+    print('🧹 데이터 정리 타이머 시작 (1시간 간격)');
+  }
+
+  /// 관심종목 로드
+  Future<void> _loadWatchlist() async {
+    print('📋 _loadWatchlist() 함수 시작');
+    try {
+      // AppDataManager의 WatchlistRepository 인스턴스 사용
+      final watchlistRepository = AppDataManager.instance.watchlistRepository;
+      // market 정보를 포함한 상세 정보로 로드
+      final watchlistData = await watchlistRepository.getWatchlistWithStockInfo();
+      
+      _watchlistItems = watchlistData.map((item) => {
+        'stock_code': item['stock_code'],
+        'stock_name': item['stock_name'],
+        'market': item['market'] ?? 'UNKNOWN',
+        'added_at': item['added_at'],
+        'memo': item['memo'],
+      }).toList();
+      
+      print('📋 관심종목 로드 완료: ${_watchlistItems.length}개');
+      
+      // 나스닥 종목 확인
+      print('🔍 나스닥 종목 확인 시작...');
+      print('📋 전체 관심종목: ${_watchlistItems.length}개');
+      
+      for (final item in _watchlistItems) {
+        final stockCode = item['stock_code'] as String? ?? '';
+        final stockName = item['stock_name'] as String? ?? '';
+        final market = item['market'] as String? ?? '';
+        final isNasdaq = _isNasdaqStock(stockCode);
+        print('  - $stockCode ($stockName): market=$market, isNasdaq=$isNasdaq');
+      }
+      
+      final nasdaqItems = _watchlistItems.where((item) => 
+        _isNasdaqStock(item['stock_code'])).toList();
+      print('🇺🇸 나스닥 종목 개수: ${nasdaqItems.length}개');
+      
+      for (final item in nasdaqItems) {
+        print('  - ${item['stock_name']} (${item['stock_code']})');
+      }
+      
+      // 국내 종목 확인
+      final domesticItems = _watchlistItems.where((item) => 
+        !_isNasdaqStock(item['stock_code'])).toList();
+      print('🇰🇷 국내 종목 개수: ${domesticItems.length}개');
+      
+      for (final item in domesticItems) {
+        print('  - ${item['stock_name']} (${item['stock_code']})');
+      }
+      
+    } catch (e) {
+      print('❌ 관심종목 로드 실패: $e');
+      _watchlistItems = [];
+    }
+    print('📋 _loadWatchlist() 함수 종료');
+  }
+
+  /// 보유종목 로드 (국내 + 해외 완전 로드 후 화면 업데이트)
+  Future<void> _loadHoldings() async {
+    print('💼 _loadHoldings() 함수 시작');
+    try {
+      print('🔍 보유종목 완전 로드 시작...');
+      
+      // 1. KIS API 서비스 확인
+      print('🔧 KIS API 서비스 상태: ${KisUnifiedApiService().isAuthenticated}');
+      
+      // API 설정 확인
+      final apiConfig = KisUnifiedApiService().apiConfig;
+      print('🔧 API 설정: $apiConfig');
+      
+      // API 설정이 유효하지 않은 경우에도 시도해보기
+      if (!apiConfig['isValid']) {
+        print('⚠️ API 설정이 유효하지 않지만 보유종목 조회를 시도합니다.');
+        
+        // API 재인증 시도
+        try {
+          await KisUnifiedApiService().initialize(
+            appKey: ApiConfig.instance.appKey!,
+            appSecret: ApiConfig.instance.appSecret!,
+            accountNumber: ApiConfig.instance.accountNo!,
+          );
+          print('✅ API 재인증 성공');
+        } catch (e) {
+          print('❌ API 재인증 실패: $e');
+          if (mounted) {
+            setState(() {
+              _holdingsItems = [];
+            });
+          }
+          print('✅ API 설정 없음 - 빈 보유종목 설정');
+          return;
+        }
+      }
+      
+      // 2. 국내 보유종목 로드 (통일된 API 서비스 사용)
+      print('🇰🇷 국내 보유종목 로드 중...');
+      final domesticHoldings = await _unifiedApiService.getPositionsCompat();
+      print('✅ 국내 보유종목: ${domesticHoldings.length}개');
+      
+      // 3. 해외 보유종목 로드 (통일된 API 서비스 사용)
+      print('🌍 해외 보유종목 로드 중...');
+      List<Map<String, dynamic>> overseasHoldings = [];
+      try {
+        overseasHoldings = await _unifiedApiService.getOverseasHoldingsCompat();
+        print('✅ 해외 보유종목: ${overseasHoldings.length}개');
+      } catch (e) {
+        print('⚠️ 해외 보유종목 로드 실패: $e');
+        overseasHoldings = [];
+      }
+      
+      // 4. 모든 보유종목 합치기
+      final allHoldings = <Map<String, dynamic>>[];
+      allHoldings.addAll(domesticHoldings);
+      allHoldings.addAll(overseasHoldings);
+      
+      print('📊 전체 보유종목: ${allHoldings.length}개');
+      
+      // 5. 보유종목 상세 정보 출력
+      for (final holding in allHoldings) {
+        final stockCode = holding['stockCode'] as String? ?? '';
+        final stockName = holding['stockName'] as String? ?? '';
+        final quantity = holding['quantity'] as int? ?? 0;
+        final isOverseas = _isNasdaqStock(stockCode);
+        print('📊 보유종목: $stockCode ($stockName) - ${quantity}주 ${isOverseas ? '(해외)' : '(국내)'}');
+      }
+      
+      // 6. AppDataManager에 저장 (다른 화면과 동기화)
+      AppDataManager.instance.positions = allHoldings;
+      
+      // 7. 종목명 매핑 개선
+      await _improveStockNames();
+      
+      // 8. 모든 API 조회 완료 후 화면 업데이트
+      if (mounted) {
+        setState(() {
+          _holdingsItems = allHoldings;
+        });
+        print('✅ 화면 업데이트 완료: ${_holdingsItems.length}개');
+      }
+      
+      print('✅ 보유종목 완전 로드 완료: ${_holdingsItems.length}개');
+      
+    } catch (e) {
+      print('❌ 보유종목 로드 실패: $e');
+      print('❌ 에러 상세: ${e.toString()}');
+      print('❌ 에러 스택: ${StackTrace.current}');
+      
+      // 에러 발생 시 빈 배열로 설정 (mounted 체크)
+      if (mounted) {
+        setState(() {
+          _holdingsItems = [];
+        });
+        print('✅ 에러 후 빈 보유종목 설정');
+      }
+    }
+    print('💼 _loadHoldings() 함수 종료');
+  }
+
+  /// 종목명 매핑 개선
+  Future<void> _improveStockNames() async {
+    print('🔍 종목명 매핑 개선 시작...');
+    
+    for (int i = 0; i < _holdingsItems.length; i++) {
+      final item = _holdingsItems[i];
+      final stockCode = item['stockCode'] as String? ?? '';
+      
+      if (stockCode.isEmpty) continue;
+      
+      // 현재 종목명 확인
+      final currentName = item['stockName'] as String? ?? '';
+      print('📝 종목 $i ($stockCode): 현재명=$currentName');
+      
+      // 종목명이 비어있거나 "Unknown"인 경우 개선
+      if (currentName.isEmpty || currentName == 'Unknown' || currentName == stockCode) {
+        try {
+          // AppDataManager에서 종목명 조회
+          final improvedName = await AppDataManager.instance.getStockNameAsync(stockCode);
+          print('📝 종목 $i ($stockCode): 개선된명=$improvedName');
+          
+          if (improvedName.isNotEmpty && improvedName != stockCode) {
+            if (mounted) {
+              setState(() {
+                _holdingsItems[i]['stockName'] = improvedName;
+              });
+              print('✅ 종목명 개선 완료: $stockCode -> $improvedName');
+            }
+          }
+        } catch (e) {
+          print('❌ 종목명 개선 실패 ($stockCode): $e');
+        }
+      }
+    }
+    
+    print('✅ 종목명 매핑 개선 완료');
+  }
+
+  /// 초기 분석 수행
+  Future<void> _performInitialAnalysis() async {
+    print('🔍 분석탭 초기 분석 시작');
+    print('📊 현재 데이터 상태:');
+    print('  - 관심종목: ${_watchlistItems.length}개');
+    print('  - 보유종목: ${_holdingsItems.length}개');
+    print('🔍 _performInitialAnalysis 호출됨 - 스택 트레이스: ${StackTrace.current.toString().split('\n').take(3).join('\n')}');
+    
+    final allStocks = <String>[];
+    
+    // 관심종목 추가
+    for (final item in _watchlistItems) {
+      allStocks.add(item['stock_code']);
+      print('📝 관심종목 추가: ${item['stock_code']} - ${item['stock_name']}');
+    }
+    
+    // 보유종목 추가
+    for (final holding in _holdingsItems) {
+      final stockCode = holding['stockCode'] as String?;
+      if (stockCode != null && !allStocks.contains(stockCode)) {
+        allStocks.add(stockCode);
+        print('📝 보유종목 추가: $stockCode - ${holding['stockName']}');
+      }
+    }
+    
+    print('📊 분석 대상 종목: $allStocks');
+    
+    if (allStocks.isNotEmpty) {
+      // 초기 진입 시 API 조회로 최신 데이터 확보
+      await _refreshLatestDataFromAPI(allStocks);
+      await _analyzeStocksFromLocalData(allStocks);
+    } else {
+      print('⚠️ 분석할 종목이 없습니다.');
+    }
+  }
+
+  /// API에서 최신 데이터를 가져와서 로컬 DB 업데이트
+  Future<void> _refreshLatestDataFromAPI(List<String> stockCodes) async {
+    print('🔄 API에서 최신 데이터 수집 시작 (${stockCodes.length}개 종목)');
+    
+    for (final stockCode in stockCodes) {
+      try {
+        print('📊 API 데이터 수집: $stockCode');
+        
+        // API에서 현재가 데이터 조회 (통일된 API 서비스 사용)
+        Map<String, dynamic>? priceData = await _unifiedApiService.getStockPrice(stockCode);
+        
+        if (priceData != null && priceData.isNotEmpty) {
+          // 로컬 DB에 저장 (올바른 매개변수 사용)
+          await _realtimeDataRepository.saveRealtimeData(
+            stockCode: stockCode,
+            market: 'UNKNOWN',
+            currentPrice: (priceData['currentPrice'] ?? 0.0).toDouble(),
+            prevClose: (priceData['prevClose'] ?? 0.0).toDouble(),
+            changeAmount: (priceData['change'] ?? 0.0).toDouble(),
+            changeRate: (priceData['changeRate'] ?? 0.0).toDouble(),
+            volume: (priceData['volume'] ?? 0).toInt(),
+            tradeAmount: (priceData['tradeAmount'] ?? 0.0).toDouble(),
+            highPrice: (priceData['high'] ?? priceData['highPrice'] ?? 0.0).toDouble(),
+            lowPrice: (priceData['low'] ?? priceData['lowPrice'] ?? 0.0).toDouble(),
+            openPrice: (priceData['open'] ?? priceData['openPrice'] ?? 0.0).toDouble(),
+            marketCap: priceData['marketCap']?.toDouble(),
+            per: priceData['per']?.toDouble(),
+            pbr: priceData['pbr']?.toDouble(),
+          );
+          print('✅ API 데이터 저장 완료: $stockCode');
+        } else {
+          print('⚠️ API 데이터 없음: $stockCode');
+        }
+        
+        // 차트 데이터도 조회 (일봉 데이터) - 통일된 API 서비스 사용
+        try {
+          List<Map<String, dynamic>> chartData = await _unifiedApiService.getDailyChart(stockCode, count: 80);
+          
+          if (chartData.isNotEmpty) {
+            // 로컬 DB에 저장 (upsertDailyBars 사용)
+            final market = _isNasdaqStock(stockCode) ? 'NASDAQ' : 'KOSPI';
+            final bars = chartData.map((e) => {
+              'date': (e['date'] ?? '').toString().replaceAll('-', ''),
+              'open': (e['open'] ?? 0.0).toDouble(),
+              'high': (e['high'] ?? 0.0).toDouble(),
+              'low': (e['low'] ?? 0.0).toDouble(),
+              'close': (e['close'] ?? 0.0).toDouble(),
+              'volume': (e['volume'] ?? 0).toInt(),
+            }).toList();
+
+            await _historicalDataRepository.upsertDailyBars(
+              stockCode: stockCode,
+              market: market,
+              bars: bars,
+              keepDays: 60,
+            );
+            print('✅ 차트 데이터 저장 완료: $stockCode');
+          }
+        } catch (e) {
+          print('⚠️ 차트 데이터 조회 실패 ($stockCode): $e');
+        }
+        
+        // API 호출 간격 조절 (서버 부하 방지)
+        await Future.delayed(const Duration(milliseconds: 200));
+        
+      } catch (e) {
+        print('❌ API 데이터 수집 실패 ($stockCode): $e');
+      }
+    }
+    
+    print('✅ API 최신 데이터 수집 완료');
+  }
+
+  /// 로컬 DB에서 데이터를 가져와서 분석 수행
+  Future<void> _analyzeStocksFromLocalData(List<String> stockCodes) async {
+    print('🔍 로컬 DB 데이터로 분석 시작');
+    
+    // 배치 업데이트를 위한 임시 저장소
+    final Map<String, Map<String, dynamic>> tempAnalysisResults = {};
+    
+    for (final stockCode in stockCodes) {
+      try {
+        print('📊 종목 분석 시작: $stockCode');
+        
+        // 1. 로컬 DB에서 실시간 데이터 가져오기
+        final realtimeData = await _realtimeDataRepository.getLatestRealtimeData(stockCode);
+        
+        // 2. 로컬 DB에서 히스토리 데이터 가져오기
+        final historicalData = await _historicalDataRepository.getRecentBars(stockCode, limit: 80);
+        
+        if (realtimeData != null && historicalData.isNotEmpty) {
+          print('✅ 로컬 DB 데이터 발견: $stockCode');
+          
+          // 3. UnifiedAnalysisService를 사용하여 분석 수행
+          final analysisResult = await _unifiedAnalysis.analyzeStock(
+            stockCode,
+            currentPrice: (realtimeData['current_price'] ?? 0.0).toDouble(),
+            prevClose: (realtimeData['prev_close'] ?? 0.0).toDouble(),
+            volume: (realtimeData['volume'] ?? 0).toDouble(),
+            highPrice: (realtimeData['high_price'] ?? 0.0).toDouble(),
+            lowPrice: (realtimeData['low_price'] ?? 0.0).toDouble(),
+            openPrice: (realtimeData['open_price'] ?? 0.0).toDouble(),
+          );
+          
+          if (analysisResult != null) {
+            // 종목 정보 추가
+            final stockName = await AppDataManager.instance.getStockNameAsync(stockCode);
+            analysisResult['stockName'] = stockName.isNotEmpty ? stockName : stockCode;
+            
+            // 수집된 데이터 추가
+            analysisResult['currentPriceData'] = {
+              'currentPrice': (realtimeData['current_price'] ?? 0.0).toDouble(),
+              'prevClose': (realtimeData['prev_close'] ?? 0.0).toDouble(),
+              'volume': (realtimeData['volume'] ?? 0).toInt(),
+              'highPrice': (realtimeData['high_price'] ?? 0.0).toDouble(),
+              'lowPrice': (realtimeData['low_price'] ?? 0.0).toDouble(),
+              'openPrice': (realtimeData['open_price'] ?? 0.0).toDouble(),
+              'timestamp': realtimeData['timestamp'] != null ? DateTime.fromMillisecondsSinceEpoch(realtimeData['timestamp']).toIso8601String() : null,
+            };
+            
+            analysisResult['chartData'] = historicalData.map((bar) => {
+              'date': bar['date'] ?? '',
+              'open': (bar['open'] ?? 0.0).toDouble(),
+              'high': (bar['high'] ?? 0.0).toDouble(),
+              'low': (bar['low'] ?? 0.0).toDouble(),
+              'close': (bar['close'] ?? 0.0).toDouble(),
+              'volume': (bar['volume'] ?? 0).toInt(),
+            }).toList();
+            
+            tempAnalysisResults[stockCode] = analysisResult;
+            print('✅ 로컬 DB 분석 완료: $stockCode - ${analysisResult['signal']}');
+          }
+        } else {
+          print('⚠️ 로컬 DB 데이터 없음: $stockCode - API 분석으로 폴백');
+          // 로컬 DB에 데이터가 없으면 기존 API 분석으로 폴백
+          final result = await _performSingleStockAnalysis(stockCode);
+          if (result != null) {
+            tempAnalysisResults[stockCode] = result;
+          }
+        }
+      } catch (e) {
+        print('❌ 로컬 DB 분석 실패 ($stockCode): $e');
+        // 에러 발생 시 기존 API 분석으로 폴백
+        try {
+          final result = await _performSingleStockAnalysis(stockCode);
+          if (result != null) {
+            tempAnalysisResults[stockCode] = result;
+          }
+        } catch (fallbackError) {
+          print('❌ 폴백 분석도 실패 ($stockCode): $fallbackError');
+        }
+      }
+    }
+    
+    // 배치 업데이트 - 한 번에 모든 결과를 UI에 반영
+    if (mounted) {
+      setState(() {
+        _analysisResults.addAll(tempAnalysisResults);
+      });
+      print('✅ 로컬 DB 분석 배치 업데이트 완료: ${tempAnalysisResults.length}개 종목');
+    }
+  }
+
+
+
+  /// 실시간 분석 수행 (차트 데이터 포함, 1분 간격)
+  Future<void> _performRealTimeAnalysis() async {
+    print('🔄 실시간 분석 시작 (차트 데이터 포함 - 1분 간격)...');
+    
+    // 사일런트 리프레시 상태 확인
+    final realtimeUIManager = AppDataManager.instance.realtimeUIManager;
+    if (realtimeUIManager.isSilentRefresh) {
+      print('📊 사일런트 리프레시 중 - UI 업데이트 건너뛰기');
+      return;
+    }
+    
+    // 🔧 강제 새로고침: 캐시 무효화 후 새로 계산
+    await _forceRefreshAnalysis();
+    
+    final allStocks = <String>[];
+    
+    // 관심종목 추가
+    for (final item in _watchlistItems) {
+      allStocks.add(item['stock_code']);
+    }
+    
+    // 보유종목 추가
+    for (final holding in _holdingsItems) {
+      final stockCode = holding['stockCode'] as String?;
+      if (stockCode != null && !allStocks.contains(stockCode)) {
+        allStocks.add(stockCode);
+      }
+    }
+    
+    // 기존 분석 결과 백업 (깜빡임 방지)
+    final Map<String, Map<String, dynamic>> existingResults = Map.from(_analysisResults);
+    bool hasChanges = false;
+    
+    // API에서 최신 데이터 수집 (1분마다)
+    await _refreshLatestDataFromAPI(allStocks);
+    
+    // 모든 종목 분석 (로컬 DB 데이터 우선 사용)
+    for (final stockCode in allStocks) {
+      try {
+        final result = await _performSingleStockAnalysisWithLocalData(stockCode);
+        if (result != null) {
+          // 변경사항이 있는지 확인 (더 정확한 비교)
+          final existingResult = existingResults[stockCode];
+          if (existingResult == null || !_isAnalysisResultEqual(existingResult, result)) {
+            existingResults[stockCode] = result;
+            hasChanges = true;
+            print('📊 분석 결과 변경 감지: $stockCode');
+          }
+        }
+      } catch (e) {
+        print('❌ 실시간 분석 실패 ($stockCode): $e');
+      }
+    }
+    
+    // 변경사항이 있을 때만 UI 업데이트 (깜빡임 완전 방지)
+    if (mounted && hasChanges) {
+      // 사일런트 업데이트를 위한 플래그 설정
+      final wasSilentRefresh = realtimeUIManager.isSilentRefresh;
+      
+      setState(() {
+        _analysisResults.clear();
+        _analysisResults.addAll(existingResults);
+      });
+      
+      print('✅ 실시간 분석 완료: ${existingResults.length}개 종목 업데이트 (변경사항 있음)');
+      
+      // 시그널 처리 (실시간 분석에서만)
+      await _processSignalsFromRealTimeAnalysis(existingResults);
+      
+      // 추천종목 업데이트
+      await _updateRecommendedStocks();
+      
+      print('✅ 실시간 분석 완료: ${existingResults.length}개 종목 업데이트 (변경사항 있음)');
+    } else {
+      print('✅ 실시간 분석 완료: 변경사항 없음 (사일런트)');
+    }
+  }
+
+  /// 로컬 DB 데이터를 우선적으로 사용하는 단일 종목 분석
+  Future<Map<String, dynamic>?> _performSingleStockAnalysisWithLocalData(String stockCode) async {
+    try {
+      print('🔍 로컬 DB 데이터로 단일 종목 분석: $stockCode');
+      
+      // 1. 로컬 DB에서 실시간 데이터 가져오기
+      final realtimeData = await _realtimeDataRepository.getLatestRealtimeData(stockCode);
+      
+      // 2. 로컬 DB에서 히스토리 데이터 가져오기
+      final historicalData = await _historicalDataRepository.getRecentBars(stockCode, limit: 80);
+      
+      if (realtimeData != null && historicalData.isNotEmpty) {
+        print('✅ 로컬 DB 데이터 사용: $stockCode');
+        
+        // 3. UnifiedAnalysisService를 사용하여 분석 수행
+        final analysisResult = await _unifiedAnalysis.analyzeStock(
+          stockCode,
+          currentPrice: _toDouble(realtimeData['current_price']),
+          prevClose: _toDouble(realtimeData['prev_close']),
+          volume: _toDouble(realtimeData['volume']),
+          highPrice: _toDouble(realtimeData['high_price']),
+          lowPrice: _toDouble(realtimeData['low_price']),
+          openPrice: _toDouble(realtimeData['open_price']),
+        );
+        
+        if (analysisResult != null) {
+          // 종목 정보 추가
+          final stockName = await AppDataManager.instance.getStockNameAsync(stockCode);
+          analysisResult['stockName'] = stockName.isNotEmpty ? stockName : stockCode;
+          
+          // 수집된 데이터 추가
+          analysisResult['currentPriceData'] = {
+            'currentPrice': _toDouble(realtimeData['current_price']),
+            'prevClose': _toDouble(realtimeData['prev_close']),
+            'volume': _toInt(realtimeData['volume']),
+            'highPrice': _toDouble(realtimeData['high_price']),
+            'lowPrice': _toDouble(realtimeData['low_price']),
+            'openPrice': _toDouble(realtimeData['open_price']),
+            'timestamp': realtimeData['timestamp'] != null ? DateTime.fromMillisecondsSinceEpoch(realtimeData['timestamp']).toIso8601String() : null,
+          };
+          
+          analysisResult['chartData'] = historicalData.map((bar) => {
+            'date': bar['date'] ?? '',
+            'open': _toDouble(bar['open']),
+            'high': _toDouble(bar['high']),
+            'low': _toDouble(bar['low']),
+            'close': _toDouble(bar['close']),
+            'volume': _toInt(bar['volume']),
+          }).toList();
+          
+          return analysisResult;
+        }
+      } else {
+        print('⚠️ 로컬 DB 데이터 없음: $stockCode - API 분석으로 폴백');
+        // 로컬 DB에 데이터가 없으면 기존 API 분석으로 폴백
+        return await _performSingleStockAnalysis(stockCode);
+      }
+      
+      return null;
+    } catch (e) {
+      print('❌ 로컬 DB 분석 실패 ($stockCode): $e');
+      // 에러 발생 시 기존 API 분석으로 폴백
+      return await _performSingleStockAnalysis(stockCode);
+    }
+  }
+
+  /// 실시간 분석에서 시그널 처리
+  Future<void> _processSignalsFromRealTimeAnalysis(Map<String, Map<String, dynamic>> analysisResults) async {
+    print('🔄 실시간 분석 시그널 처리 시작...');
+    
+    for (final entry in analysisResults.entries) {
+      final stockCode = entry.key;
+      final analysis = entry.value;
+      
+      try {
+        // 관심종목에서 해당 종목 찾기
+        final watchlistItem = _watchlistItems.firstWhere(
+          (item) => item['stock_code'] == stockCode,
+          orElse: () => <String, dynamic>{},
+        );
+        
+        if (watchlistItem.isNotEmpty) {
+          await _handleSignalAndAutoTrading(
+            watchlistItem, 
+            stockCode, 
+            analysis, 
+            _currentPrices[stockCode]
+          );
+        } else {
+          // 보유종목에서 찾기
+          final holdingItem = _holdingsItems.firstWhere(
+            (item) => item['stockCode'] == stockCode,
+            orElse: () => <String, dynamic>{},
+          );
+          
+          if (holdingItem.isNotEmpty) {
+            await _handleSignalAndAutoTrading(
+              holdingItem, 
+              stockCode, 
+              analysis, 
+              _currentPrices[stockCode]
+            );
+          }
+        }
+      } catch (e) {
+        print('❌ 실시간 시그널 처리 실패 ($stockCode): $e');
+      }
+    }
+    
+    print('✅ 실시간 분석 시그널 처리 완료');
+  }
+
+  /// 분석 결과 비교 (깜빡임 방지용)
+  bool _isAnalysisResultEqual(Map<String, dynamic> result1, Map<String, dynamic> result2) {
+    try {
+      // 주요 필드만 비교
+      final price1 = result1['currentPrice'] ?? 0.0;
+      final price2 = result2['currentPrice'] ?? 0.0;
+      final signal1 = result1['signal'] ?? '';
+      final signal2 = result2['signal'] ?? '';
+      final confidence1 = result1['confidence'] ?? 0.0;
+      final confidence2 = result2['confidence'] ?? 0.0;
+      
+      return (price1 == price2 && signal1 == signal2 && confidence1 == confidence2);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 빠른 현재가 업데이트 (현재가만 - 차트 데이터 제외, 5초 간격)
+  Future<void> _performQuickPriceUpdate() async {
+    if (!mounted) return;
+    
+    // 사일런트 리프레시 상태 확인
+    final realtimeUIManager = AppDataManager.instance.realtimeUIManager;
+    if (realtimeUIManager.isSilentRefresh) {
+      print('📊 사일런트 리프레시 중 - 빠른 업데이트 건너뛰기');
+      return;
+    }
+    
+    try {
+      print('⚡ 빠른 업데이트 시작 (현재가만 - 5초 간격)');
+      
+      final allStocks = <String>[];
+      
+      // 관심종목 추가
+      for (final item in _watchlistItems) {
+        allStocks.add(item['stock_code']);
+      }
+      
+      // 보유종목 추가
+      for (final holding in _holdingsItems) {
+        final stockCode = holding['stockCode'] as String?;
+        if (stockCode != null && !allStocks.contains(stockCode)) {
+          allStocks.add(stockCode);
+        }
+      }
+      
+      // 기존 분석 결과에서 현재가만 업데이트
+      final Map<String, Map<String, dynamic>> updatedResults = Map.from(_analysisResults);
+      bool hasUpdates = false;
+      
+      for (final stockCode in allStocks) {
+        try {
+          // 현재가만 빠르게 조회 (차트 데이터 제외)
+          final currentPrice = await _getQuickCurrentPrice(stockCode);
+          if (currentPrice > 0 && updatedResults.containsKey(stockCode)) {
+            final existingResult = updatedResults[stockCode]!;
+            final oldPrice = existingResult['currentPrice'] ?? 0.0;
+            if ((currentPrice - oldPrice).abs() > 0.01) { // 0.01 이상 차이나면 업데이트
+              existingResult['currentPrice'] = currentPrice;
+              
+              // 현재가 캐시 업데이트 (새로운 맵으로 복사)
+              AppDataManager.instance.updateCurrentPrice(stockCode, {
+                'currentPrice': currentPrice,
+                'timestamp': DateTime.now().toIso8601String(),
+              });
+              
+              hasUpdates = true;
+              print('📊 현재가 변경 감지: $stockCode ${oldPrice.toStringAsFixed(2)} → ${currentPrice.toStringAsFixed(2)}');
+            }
+          }
+        } catch (e) {
+          // 빠른 업데이트 실패는 무시
+          print('⚠️ 빠른 업데이트 실패 ($stockCode): $e');
+        }
+      }
+      
+      // 변경사항이 있을 때만 UI 업데이트 (사일런트)
+      if (hasUpdates && mounted) {
+        setState(() {
+          _analysisResults.clear();
+          _analysisResults.addAll(updatedResults);
+        });
+        print('✅ 빠른 업데이트 완료: 현재가 변경사항 반영');
+        
+        // 현재가 변경 시 추천종목 업데이트
+        await _updateRecommendedStocks();
+      } else {
+        print('✅ 빠른 업데이트 완료: 변경사항 없음');
+      }
+      
+    } catch (e) {
+      print('❌ 빠른 업데이트 실패: $e');
+    }
+  }
+
+  /// 🔧 강제 새로고침: 캐시 무효화 후 새로 계산
+  Future<void> _forceRefreshAnalysis() async {
+    try {
+      print('🔄 강제 새로고침 시작: 캐시 무효화 후 새로 계산');
+      
+      // 1. 모든 캐시 무효화
+      AppDataManager.instance.invalidateCache();
+      UnifiedStockDataManager.instance.clearCache();
+      
+      // 2. 분석 결과 캐시도 무효화
+      _analysisResults.clear();
+      
+      // 3. 모든 종목에 대해 새로 분석 수행
+      final allStocks = <String>[];
+      
+      // 관심종목 추가
+      for (final item in _watchlistItems) {
+        allStocks.add(item['stock_code']);
+      }
+      
+      // 보유종목 추가
+      for (final holding in _holdingsItems) {
+        final stockCode = holding['stockCode'] as String?;
+        if (stockCode != null && !allStocks.contains(stockCode)) {
+          allStocks.add(stockCode);
+        }
+      }
+      
+      // 4. 각 종목별로 새로 분석
+      for (final stockCode in allStocks) {
+        try {
+          print('🔄 강제 새로고침: $stockCode 분석 중...');
+          
+          // API에서 최신 데이터 조회
+          print('🔍 [AnalysisScreen] 강제 새로고침 - 현재가 데이터 수집 시작: $stockCode');
+          final currentPriceData = await _collectAndCacheCurrentPriceData(stockCode);
+          print('📊 [AnalysisScreen] 강제 새로고침 - 현재가 데이터: $currentPriceData');
+          final chartData = await _collectAndCacheChartData(stockCode);
+          
+          // 새로 분석 수행
+          final analysisResult = await _unifiedAnalysis.analyzeStock(
+            stockCode,
+            currentPrice: _toDouble(currentPriceData?['currentPrice']),
+            prevClose: _toDouble(currentPriceData?['prevClose']),
+            volume: _toDouble(currentPriceData?['volume']),
+            highPrice: _toDouble(currentPriceData?['highPrice']),
+            lowPrice: _toDouble(currentPriceData?['lowPrice']),
+            openPrice: _toDouble(currentPriceData?['openPrice']),
+            investmentStyle: _currentStyle,
+          );
+          
+          if (analysisResult != null) {
+            _analysisResults[stockCode] = analysisResult;
+            print('✅ 강제 새로고침: $stockCode 분석 완료');
+          }
+        } catch (e) {
+          print('❌ 강제 새로고침 실패 ($stockCode): $e');
+        }
+      }
+      
+      print('✅ 강제 새로고침 완료: ${allStocks.length}개 종목');
+      
+    } catch (e) {
+      print('❌ 강제 새로고침 실패: $e');
+    }
+  }
+
+  /// 빠른 현재가 조회 (차트 데이터 제외)
+  Future<double> _getQuickCurrentPrice(String stockCode) async {
+    try {
+      if (stockCode.isEmpty) return 0.0;
+      // 캐시된 데이터 우선 확인
+      final cachedData = AppDataManager.instance.getCachedStockData(stockCode);
+      if (cachedData.isNotEmpty) {
+        final cachedPrice = (cachedData['currentPrice'] ?? 0.0).toDouble();
+        if (cachedPrice > 0) {
+          return cachedPrice;
+        }
+      }
+      
+      // API에서 현재가만 빠르게 조회
+      Map<String, dynamic>? priceData = await _unifiedApiService.getStockPrice(stockCode);
+      
+      if (priceData != null && priceData.isNotEmpty) {
+        // API에서 반환된 데이터가 불변 맵일 수 있으므로 새로운 맵으로 복사
+        final Map<String, dynamic> safePriceData = priceData;
+        final currentPrice = _toDouble(safePriceData['currentPrice']);
+        if (currentPrice > 0) {
+          // 캐시 업데이트 (새로운 맵으로 복사)
+          AppDataManager.instance.updateCurrentPrice(stockCode, safePriceData);
+          return currentPrice;
+        }
+      }
+      
+      return 0.0;
+    } catch (e) {
+      print('❌ 빠른 현재가 조회 실패 ($stockCode): $e');
+      return 0.0;
+    }
+  }
+
+  /// 단일 종목 분석 (UI 업데이트 없이)
+  Future<Map<String, dynamic>?> _performSingleStockAnalysis(String stockCode) async {
+    try {
+      // 관심종목에서 찾기
+      final watchlistItem = _watchlistItems.firstWhere(
+        (item) => item['stock_code'] == stockCode,
+        orElse: () => <String, dynamic>{},
+      );
+      
+      if (watchlistItem.isNotEmpty) {
+        return await _performAnalysisForStock(watchlistItem);
+      }
+      
+      // 보유종목에서 찾기
+      final holdingItem = _holdingsItems.firstWhere(
+        (item) => item['stockCode'] == stockCode,
+        orElse: () => <String, dynamic>{},
+      );
+      
+      if (holdingItem.isNotEmpty) {
+        return await _performAnalysisForHolding(holdingItem);
+      }
+      
+      return null;
+    } catch (e) {
+      print('❌ 단일 종목 분석 실패 ($stockCode): $e');
+      return null;
+    }
+  }
+
+  /// 종목들 분석
+  Future<void> _analyzeStocks(List<String> stockCodes) async {
+    print('🔍 분석탭 _analyzeStocks 함수 시작');
+    print('📊 전달받은 stockCodes: $stockCodes');
+    print('📊 _watchlistItems 개수: ${_watchlistItems.length}');
+    print('📊 _holdingsItems 개수: ${_holdingsItems.length}');
+    
+    // 나스닥 종목 확인
+    final nasdaqStocks = stockCodes.where((code) => _isNasdaqStock(code)).toList();
+    print('🇺🇸 분석 대상 나스닥 종목: $nasdaqStocks');
+    
+    final config = KisUnifiedApiService().apiConfig;
+    
+    // 배치 업데이트를 위한 임시 저장소
+    final Map<String, Map<String, dynamic>> tempAnalysisResults = {};
+    
+    // 관심종목 분석
+    print('📋 관심종목 분석 시작...');
+    for (final item in _watchlistItems) {
+      print('📝 관심종목 분석: ${item['stock_code']} - ${item['stock_name']}');
+      try {
+        final result = await _performAnalysisForStock(item);
+        if (result != null) {
+          tempAnalysisResults[item['stock_code']] = result;
+        }
+      } catch (e) {
+        print('❌ 관심종목 분석 실패 (${item['stock_code']}): $e');
+      }
+    }
+    
+    // 보유종목 분석
+    print('💼 보유종목 분석 시작...');
+    for (final holding in _holdingsItems) {
+      print('📝 보유종목 분석: ${holding['stockCode']} - ${holding['stockName']}');
+      try {
+        final stockCode = holding['stockCode'] as String? ?? '';
+        if (stockCode.isNotEmpty) {
+          final result = await _performAnalysisForHolding(holding);
+          if (result != null) {
+            tempAnalysisResults[stockCode] = result;
+          }
+        }
+      } catch (e) {
+        print('❌ 보유종목 분석 실패 (${holding['stockCode']}): $e');
+      }
+    }
+    
+    // 배치 업데이트 - 한 번에 모든 결과를 UI에 반영 (화면 깜빡임 방지)
+    if (mounted) {
+      setState(() {
+        _analysisResults.addAll(tempAnalysisResults);
+      });
+      print('✅ 배치 업데이트 완료: ${tempAnalysisResults.length}개 종목');
+    }
+    print('🔍 _analyzeStocks 함수 종료');
+  }
+
+  /// 주식별 분석 수행 (관심종목용)
+  Future<Map<String, dynamic>?> _performAnalysisForStock(Map<String, dynamic> item) async {
+    final stockCode = (item['stockCode'] ?? item['stock_code'] ?? '').toString();
+    final stockName = item['stockName'] as String? ?? stockCode;
+    print('🤖 [AnalysisScreen] 관심종목 분석 시작 ($stockCode - $stockName)');
+    print('🔍 [AnalysisScreen] 입력 데이터: $item');
+
+    try {
+      // 1. 실시간 현재가 데이터 수집 및 캐시
+      print('🔍 [AnalysisScreen] 현재가 데이터 수집 시작: $stockCode');
+      final currentPriceData = await _collectAndCacheCurrentPriceData(stockCode);
+      if (currentPriceData == null) {
+        print('❌ 현재가 데이터 수집 실패 ($stockCode)');
+        return null;
+      }
+      print('✅ [AnalysisScreen] 현재가 데이터 수집 완료: $stockCode');
+      print('📊 [AnalysisScreen] 수집된 데이터: $currentPriceData');
+
+      // 2. 차트 데이터 수집 및 캐시
+      final chartData = await _collectAndCacheChartData(stockCode);
+      if (chartData.isEmpty) {
+        print('⚠️ 차트 데이터 없음 ($stockCode) - 기본값으로 분석 진행');
+      }
+
+      // 3. UnifiedAnalysisService를 사용하여 분석 수행
+      final analysisResult = await _unifiedAnalysis.analyzeStock(
+        stockCode,
+        currentPrice: _toDouble(currentPriceData['prpr']),
+        prevClose: _toDouble(currentPriceData['stck_prdy_clpr']),
+        volume: _toDouble(currentPriceData['acml_vol']),
+        highPrice: _toDouble(currentPriceData['high']),
+        lowPrice: _toDouble(currentPriceData['low']),
+        openPrice: _toDouble(currentPriceData['open']),
+        investmentStyle: _currentStyle,
+      );
+
+      if (analysisResult != null) {
+        // 종목 정보 추가
+        analysisResult['stockName'] = stockName;
+        analysisResult['isWatchlist'] = true;
+        
+        // 수집된 데이터 추가
+        analysisResult['currentPriceData'] = currentPriceData;
+        analysisResult['chartData'] = chartData;
+        
+        print('✅ 관심종목 분석 완료 ($stockCode): ${analysisResult['signal']} (신뢰도: ${analysisResult['confidence']}%)');
+        print('📊 종합 점수: ${analysisResult['comprehensiveScore']?.toStringAsFixed(3) ?? 'N/A'}');
+        return analysisResult;
+      } else {
+        print('❌ 관심종목 분석 실패 ($stockCode)');
+        return null;
+      }
+    } catch (e) {
+      print('❌ 관심종목 분석 실패 ($stockCode): $e');
+      return null;
+    }
+  }
+
+  /// 주식별 분석 수행 (보유종목용)
+  Future<Map<String, dynamic>?> _performAnalysisForHolding(Map<String, dynamic> holding) async {
+    final stockCode = holding['stockCode'] as String? ?? '';
+    final stockName = holding['stockName'] as String? ?? stockCode;
+    final avgPrice = (holding['avgPrice'] ?? 0.0).toDouble();
+    final quantity = (holding['quantity'] ?? 0).toInt();
+    
+    print('🤖 보유종목 분석 시작 ($stockCode - $stockName)');
+
+    try {
+      // 1. 실시간 현재가 데이터 수집 및 캐시
+      print('🔍 [AnalysisScreen] 현재가 데이터 수집 시작: $stockCode');
+      final currentPriceData = await _collectAndCacheCurrentPriceData(stockCode);
+      if (currentPriceData == null) {
+        print('❌ 현재가 데이터 수집 실패 ($stockCode)');
+        return null;
+      }
+      print('✅ [AnalysisScreen] 현재가 데이터 수집 완료: $stockCode');
+      print('📊 [AnalysisScreen] 수집된 데이터: $currentPriceData');
+
+      // 2. 차트 데이터 수집 및 캐시
+      final chartData = await _collectAndCacheChartData(stockCode);
+      if (chartData.isEmpty) {
+        print('⚠️ 차트 데이터 없음 ($stockCode) - 기본값으로 분석 진행');
+      }
+
+      // 3. UnifiedAnalysisService를 사용하여 분석 수행
+      final analysisResult = await _unifiedAnalysis.analyzeStock(
+        stockCode,
+        currentPrice: _toDouble(currentPriceData['prpr']),
+        prevClose: _toDouble(currentPriceData['stck_prdy_clpr']),
+        volume: _toDouble(currentPriceData['acml_vol']),
+        highPrice: _toDouble(currentPriceData['high']),
+        lowPrice: _toDouble(currentPriceData['low']),
+        openPrice: _toDouble(currentPriceData['open']),
+        investmentStyle: _currentStyle,
+      );
+
+      if (analysisResult != null) {
+        // 보유종목 정보 추가
+        analysisResult['stockName'] = stockName;
+        analysisResult['avgPrice'] = avgPrice;
+        analysisResult['quantity'] = quantity;
+        analysisResult['isHolding'] = true;
+        
+        // 수집된 데이터 추가
+        analysisResult['currentPriceData'] = currentPriceData;
+        analysisResult['chartData'] = chartData;
+        
+        // 수익률 계산
+        final currentPrice = analysisResult['currentPrice'] ?? 0.0;
+        double profitRate = 0.0;
+        if (avgPrice > 0) {
+          profitRate = ((currentPrice - avgPrice) / avgPrice) * 100;
+        }
+        analysisResult['profitRate'] = profitRate;
+        
+        print('✅ 보유종목 분석 완료 ($stockCode): ${analysisResult['signal']} (수익률: ${profitRate.toStringAsFixed(2)}%)');
+        print('📊 종합 점수: ${analysisResult['comprehensiveScore']?.toStringAsFixed(3) ?? 'N/A'}');
+        return analysisResult;
+      } else {
+        print('❌ 보유종목 분석 실패 ($stockCode)');
+        return null;
+      }
+    } catch (e) {
+      print('❌ 보유종목 분석 실패 ($stockCode): $e');
+      return null;
+    }
+  }
+
+  /// 실시간 현재가 데이터 수집 및 캐시 (5초 간격)
+  Future<Map<String, dynamic>?> _collectAndCacheCurrentPriceData(String stockCode) async {
+    try {
+      if (stockCode.isEmpty) {
+        print('⚠️ 현재가 수집 스킵: 종목코드가 비어있음');
+        return null;
+      }
+      print('📊 현재가 데이터 수집 시작 ($stockCode)');
+      
+      // 1. 캐시된 데이터 우선 확인 (5초 이내)
+      final cachedData = _watchlistDataCache[stockCode] ?? _holdingsDataCache[stockCode];
+      if (cachedData != null && cachedData.isNotEmpty) {
+        final cachedPrice = (cachedData['currentPrice'] ?? 0.0).toDouble();
+        final cachedTimestamp = cachedData['timestamp'] as String?;
+        
+        if (cachedPrice > 0 && cachedTimestamp != null) {
+          final cacheTime = DateTime.tryParse(cachedTimestamp);
+          if (cacheTime != null && DateTime.now().difference(cacheTime).inSeconds < 5) {
+            print('📊 캐시된 현재가 데이터 사용 ($stockCode): $cachedPrice (${DateTime.now().difference(cacheTime).inSeconds}초 전)');
+            // 캐시된 데이터도 새로운 맵으로 복사하여 반환
+            return cachedData;
+          }
+        }
+      }
+
+      // 2. API에서 실시간 데이터 조회
+      Map<String, dynamic>? realtimeData = await _unifiedApiService.getStockPrice(stockCode);
+
+      if (realtimeData != null && realtimeData.isNotEmpty) {
+        print('🔍 [AnalysisScreen] 실시간 데이터 원본: $realtimeData');
+        
+        // API에서 반환된 데이터가 불변 맵일 수 있으므로 새로운 맵으로 복사
+        final Map<String, dynamic> safeRealtimeData = realtimeData;
+        
+        // KIS API 서비스에서 공식 필드명 사용
+        final currentPrice = _toDouble(safeRealtimeData['prpr']);
+        final prevClose = _toDouble(safeRealtimeData['stck_prdy_clpr']);
+        final volume = _toInt(safeRealtimeData['acml_vol']);
+        final highPrice = _toDouble(safeRealtimeData['high']);
+        final lowPrice = _toDouble(safeRealtimeData['low']);
+        final openPrice = _toDouble(safeRealtimeData['open']);
+        final changeAmount = _toDouble(safeRealtimeData['diff']);
+        final changeRate = _toDouble(safeRealtimeData['rate']);
+        final tradeAmount = _toDouble(safeRealtimeData['tradeAmount']);
+        
+        print('🔍 [AnalysisScreen] 파싱된 데이터: currentPrice=$currentPrice, prevClose=$prevClose, volume=$volume');
+        
+        // 매핑된 데이터로 새로운 맵 생성
+        final mappedData = {
+          'currentPrice': currentPrice,
+          'prevClose': prevClose,
+          'volume': volume,
+          'highPrice': highPrice,
+          'lowPrice': lowPrice,
+          'openPrice': openPrice,
+          'changeAmount': changeAmount,
+          'changeRate': changeRate,
+          'tradeAmount': tradeAmount,
+          'timestamp': DateTime.now().toIso8601String(),
+        };
+        
+        // 현재가가 0.0이거나 고가/저가/시가가 0.0이면 히스토리 데이터에서 보정
+        if (currentPrice <= 0 || highPrice <= 0 || lowPrice <= 0 || openPrice <= 0) {
+          print('⚠️ [AnalysisScreen] $stockCode 현재가/고가/저가/시가 중 0.0 값 발견, 히스토리 데이터에서 보정');
+          
+          // 히스토리 데이터에서 현재가 가져오기
+          final chartData = await _collectAndCacheChartData(stockCode);
+          if (chartData.isNotEmpty) {
+            final latestData = chartData.first;
+            final historyCurrentPrice = (latestData['close'] ?? 0.0).toDouble();
+            final historyPrevClose = chartData.length >= 2 ? (chartData[1]['close'] ?? historyCurrentPrice).toDouble() : historyCurrentPrice;
+            final historyHigh = (latestData['high'] ?? historyCurrentPrice).toDouble();
+            final historyLow = (latestData['low'] ?? historyCurrentPrice).toDouble();
+            final historyOpen = (latestData['open'] ?? historyCurrentPrice).toDouble();
+            final historyVolume = (latestData['volume'] ?? 0).toInt();
+            
+            // 히스토리 데이터로 보정
+            mappedData['currentPrice'] = currentPrice > 0 ? currentPrice : historyCurrentPrice;
+            mappedData['prevClose'] = prevClose > 0 ? prevClose : historyPrevClose;
+            mappedData['highPrice'] = highPrice > 0 ? highPrice : historyHigh;
+            mappedData['lowPrice'] = lowPrice > 0 ? lowPrice : historyLow;
+            mappedData['openPrice'] = openPrice > 0 ? openPrice : historyOpen;
+            mappedData['volume'] = volume > 0 ? volume : historyVolume;
+            
+            print('✅ [AnalysisScreen] $stockCode 히스토리 데이터로 보정 완료:');
+            print('  - 현재가: ${mappedData['currentPrice']}');
+            print('  - 전일가: ${mappedData['prevClose']}');
+            print('  - 고가: ${mappedData['highPrice']}');
+            print('  - 저가: ${mappedData['lowPrice']}');
+            print('  - 시가: ${mappedData['openPrice']}');
+            print('  - 거래량: ${mappedData['volume']}');
+          }
+        }
+        
+        if (currentPrice > 0) {
+          // 캐시에 저장 (새로운 맵으로 복사)
+          _watchlistDataCache[stockCode] = mappedData;
+          _holdingsDataCache[stockCode] = mappedData;
+          
+          // AppDataManager 캐시에도 저장 (안전한 복사)
+          try {
+            AppDataManager.instance.updateCurrentPrice(stockCode, mappedData);
+          } catch (e) {
+            print('⚠️ AppDataManager 캐시 업데이트 실패 ($stockCode): $e');
+          }
+          
+          // 로컬 DB에 저장 (실시간 데이터)
+          await _saveRealtimeDataToDatabase(stockCode, mappedData);
+          
+          print('📊 실시간 현재가 데이터 수집 완료 ($stockCode): $currentPrice');
+          return mappedData;
+        }
+      }
+
+      print('❌ 현재가 데이터 수집 실패 ($stockCode)');
+      return null;
+    } catch (e) {
+      print('❌ 현재가 데이터 수집 실패 ($stockCode): $e');
+      return null;
+    }
+  }
+
+  /// 차트 데이터 수집 및 캐시 (3분 간격)
+  Future<List<Map<String, dynamic>>> _collectAndCacheChartData(String stockCode) async {
+    try {
+      if (stockCode.isEmpty) {
+        print('⚠️ 차트 수집 스킵: 종목코드가 비어있음');
+        return [];
+      }
+      print('📈 차트 데이터 수집 시작 ($stockCode)');
+      
+      // 1. 캐시된 차트 데이터 확인 (3분 이내)
+      final cachedChartData = AppDataManager.instance.getCachedChartData(stockCode);
+      if (cachedChartData.isNotEmpty) {
+        final cachedTimestamp = AppDataManager.instance.getChartDataTimestamp(stockCode);
+        if (cachedTimestamp != null && DateTime.now().difference(cachedTimestamp).inMinutes < 3) {
+          print('📊 캐시된 차트 데이터 사용 ($stockCode): ${cachedChartData.length}개 (${DateTime.now().difference(cachedTimestamp).inMinutes}분 전)');
+          return cachedChartData;
+        }
+      }
+
+      // 2. API에서 차트 데이터 조회
+      List<Map<String, dynamic>> chartData = await _unifiedApiService.getDailyChart(stockCode, count: 80);
+
+      if (chartData.isNotEmpty) {
+        print('🔍 [AnalysisScreen] 차트 데이터 원본 (첫 3개): ${chartData.take(3).toList()}');
+        
+        // KIS API 서비스에서 이미 변환된 키 사용 (차트 데이터)
+        final mappedChartData = chartData.map((data) {
+          return {
+            'date': data['date'] ?? '',
+            'open': _toDouble(data['open']),
+            'high': _toDouble(data['high']),
+            'low': _toDouble(data['low']),
+            'close': _toDouble(data['close']),
+            'volume': _toInt(data['volume']),
+          };
+        }).toList();
+        
+        print('🔍 [AnalysisScreen] 매핑된 차트 데이터 (첫 3개): ${mappedChartData.take(3).toList()}');
+        
+        // AppDataManager 캐시에 저장
+        AppDataManager.instance.cacheChartData(stockCode, mappedChartData);
+        
+        // 로컬 DB에 저장 (히스토리 데이터)
+        await _saveHistoricalDataToDatabase(stockCode, mappedChartData);
+        
+        print('📊 차트 데이터 수집 완료 ($stockCode): ${mappedChartData.length}개');
+        return mappedChartData;
+      }
+
+      print('⚠️ 차트 데이터 없음 ($stockCode)');
+      return [];
+    } catch (e) {
+      print('❌ 차트 데이터 수집 실패 ($stockCode): $e');
+      return [];
+    }
+  }
+
+  /// 실시간 데이터를 로컬 DB에 저장
+  Future<void> _saveRealtimeDataToDatabase(String stockCode, Map<String, dynamic> data) async {
+    try {
+      await _realtimeDataRepository.saveRealtimeData(
+        stockCode: stockCode,
+        market: _isNasdaqStock(stockCode) ? 'NASDAQ' : 'KOSPI',
+        currentPrice: _toDouble(data['currentPrice']),
+        prevClose: _toDouble(data['prevClose']),
+        changeAmount: _toDouble(data['changeAmount']),
+        changeRate: _toDouble(data['changeRate']),
+        volume: _toInt(data['volume']),
+        tradeAmount: _toDouble(data['tradeAmount']),
+        highPrice: _toDouble(data['highPrice']),
+        lowPrice: _toDouble(data['lowPrice']),
+        openPrice: _toDouble(data['openPrice']),
+        marketCap: data['marketCap'] != null ? _toDouble(data['marketCap']) : null,
+        per: data['per'] != null ? _toDouble(data['per']) : null,
+        pbr: data['pbr'] != null ? _toDouble(data['pbr']) : null,
+      );
+      print('💾 실시간 데이터 DB 저장 완료: $stockCode');
+    } catch (e) {
+      print('⚠️ 실시간 데이터 DB 저장 실패: $stockCode - $e');
+    }
+  }
+
+  /// 히스토리 데이터를 로컬 DB에 저장
+  Future<void> _saveHistoricalDataToDatabase(String stockCode, List<Map<String, dynamic>> chartData) async {
+    try {
+      final market = _isNasdaqStock(stockCode) ? 'NASDAQ' : 'KOSPI';
+      
+      final bars = chartData.map((e) => {
+        'date': (e['date'] ?? '').toString().replaceAll('-', ''),
+        'open': (e['open'] ?? 0.0).toDouble(),
+        'high': (e['high'] ?? 0.0).toDouble(),
+        'low': (e['low'] ?? 0.0).toDouble(),
+        'close': (e['close'] ?? 0.0).toDouble(),
+        'volume': (e['volume'] ?? 0).toInt(),
+      }).toList();
+
+      await _historicalDataRepository.upsertDailyBars(
+        stockCode: stockCode,
+        market: market,
+        bars: bars,
+        keepDays: 60, // 60일 보관
+      );
+      print('💾 히스토리 데이터 DB 저장 완료: $stockCode (${bars.length}개)');
+    } catch (e) {
+      print('⚠️ 히스토리 데이터 DB 저장 실패: $stockCode - $e');
+    }
+  }
+
+  /// 데이터 정리 수행 (1시간 간격)
+  Future<void> _performDataCleanup() async {
+    try {
+      print('🧹 데이터 정리 시작...');
+      
+      // 1. 오래된 실시간 데이터 정리 (24시간 이상)
+      final oneDayAgo = DateTime.now().subtract(const Duration(days: 1));
+      await _realtimeDataRepository.deleteOldData(before: oneDayAgo);
+      print('🧹 오래된 실시간 데이터 정리 완료');
+      
+      // 2. 오래된 히스토리 데이터 정리 (90일 이상)
+      final threeMonthsAgo = DateTime.now().subtract(const Duration(days: 90));
+      await _historicalDataRepository.deleteOldData(before: threeMonthsAgo);
+      print('🧹 오래된 히스토리 데이터 정리 완료');
+      
+      // 3. 메모리 캐시 정리 (1시간 이상)
+      _cleanupMemoryCache();
+      print('🧹 메모리 캐시 정리 완료');
+      
+      print('✅ 데이터 정리 완료');
+    } catch (e) {
+      print('❌ 데이터 정리 실패: $e');
+    }
+  }
+
+  /// 메모리 캐시 정리
+  void _cleanupMemoryCache() {
+    final oneHourAgo = DateTime.now().subtract(const Duration(hours: 1));
+    
+    // 현재가 캐시 정리
+    _watchlistDataCache.removeWhere((stockCode, data) {
+      final timestamp = data['timestamp'] as String?;
+      if (timestamp != null) {
+        final cacheTime = DateTime.tryParse(timestamp);
+        return cacheTime != null && cacheTime.isBefore(oneHourAgo);
+      }
+      return false;
+    });
+    
+    _holdingsDataCache.removeWhere((stockCode, data) {
+      final timestamp = data['timestamp'] as String?;
+      if (timestamp != null) {
+        final cacheTime = DateTime.tryParse(timestamp);
+        return cacheTime != null && cacheTime.isBefore(oneHourAgo);
+      }
+      return false;
+    });
+    
+    print('🧹 메모리 캐시 정리: ${_watchlistDataCache.length}개 관심종목, ${_holdingsDataCache.length}개 보유종목');
+  }
+
+  /// 가격 표시 형식 결정 (나스닥/국내 종목 구분)
+  String _formatPriceForDisplay(double price, bool isNasdaq, {bool showSign = false}) {
+    if (price == 0) return 'N/A';
+    
+    String prefix = '';
+    if (showSign && price > 0) {
+      prefix = '+';
+    } else if (showSign && price < 0) {
+      prefix = '';
+    }
+    
+    if (isNasdaq) {
+      return '$prefix\$${price.toStringAsFixed(2)}';
+    } else {
+      return '$prefix${Formatters.formatPrice(price)}';
+    }
+  }
+
+  /// 현재가와 등락률을 함께 표시
+  String _formatPriceWithChange(double currentPrice, double prevClose, bool isNasdaq) {
+    if (currentPrice == 0 || prevClose == 0) return 'N/A';
+    
+    final change = currentPrice - prevClose;
+    final changeRate = (change / prevClose) * 100;
+    
+    String priceStr;
+    if (isNasdaq) {
+      priceStr = '\$${currentPrice.toStringAsFixed(2)}';
+    } else {
+      priceStr = Formatters.formatPrice(currentPrice);
+    }
+    
+    String changeStr;
+    if (changeRate > 0) {
+      changeStr = '+${changeRate.toStringAsFixed(1)}%';
+    } else if (changeRate < 0) {
+      changeStr = '${changeRate.toStringAsFixed(1)}%';
+    } else {
+      changeStr = '0.0%';
+    }
+    
+    return '$priceStr\n($changeStr)';
+  }
+
+  /// 분석 데이터 새로고침 (수동 새로고침 - 로딩 표시 포함)
+  Future<void> _refreshAnalysisData() async {
+    print('🔄 분석 데이터 새로고침 시작 (수동 - 강제 새로고침)...');
+    
+    try {
+      // 현재 스크롤 위치 저장
+      final currentTab = _tabController.index;
+      
+      // 🔧 강제 새로고침: 캐시 무효화 후 새로 계산
+      await _forceRefreshAnalysis();
+      
+      // 현재 탭 유지
+      if (mounted && _tabController.index != currentTab) {
+        _tabController.animateTo(currentTab);
+      }
+      
+      print('✅ 분석 데이터 새로고침 완료 (수동 - 강제 새로고침)');
+    } catch (e) {
+      print('❌ 분석 데이터 새로고침 실패: $e');
+    }
+  }
+
+  // 더미 데이터 함수들 제거됨 - 실제 API 데이터만 사용
+
+  /// 종목 이름 가져오기
+  String _getDisplayName(dynamic item) {
+    String stockCode = '';
+    String stockName = '';
+    
+    if (item is Map<String, dynamic>) {
+      // 보유종목과 관심종목의 키 구조가 다름
+      stockCode = item['stock_code'] as String? ?? 
+                  item['stockCode'] as String? ?? '';
+      stockName = item['stock_name'] as String? ?? 
+                  item['stockName'] as String? ?? '';
+      
+      print('�� _getDisplayName 디버그:');
+      print('  - item 키들: ${item.keys.toList()}');
+      print('  - stockCode: $stockCode');
+      print('  - stockName: $stockName');
+    }
+    
+    // 1. 데이터베이스에서 가져온 종목명이 있으면 사용
+    if (stockName.isNotEmpty && stockName != stockCode) {
+      print('📝 종목명 사용 (데이터베이스): $stockName');
+      return stockName;
+    }
+    
+    // 2. AppDataManager에서 종목명 조회
+    if (stockCode.isNotEmpty) {
+      final masterName = AppDataManager.instance.getStockName(stockCode);
+      if (masterName.isNotEmpty && masterName != stockCode) {
+        print('📝 종목명 조회 (AppDataManager) ($stockCode): $masterName');
+        return masterName;
+      }
+    }
+    
+    // 3. 최후 수단으로 종목코드 반환
+    final result = stockCode.isNotEmpty ? stockCode : 'Unknown';
+    print('📝 최종 종목명: $result');
+    return result;
+  }
+
+  /// 투자 스타일 이름 반환
+  String _getStyleName(InvestmentStyle style) {
+    switch (style) {
+      case InvestmentStyle.conservative:
+        return '안정적 투자';
+      case InvestmentStyle.moderate:
+        return '일반적 투자';
+      case InvestmentStyle.aggressive:
+        return '공격적 투자';
+    }
+  }
+
+  /// 투자 스타일 색상 가져오기
+  Color _getStyleColor(InvestmentStyle style) {
+    switch (style) {
+      case InvestmentStyle.conservative:
+        return Colors.green; // 초록색 (방패)
+      case InvestmentStyle.moderate:
+        return const Color(0xFF3B5BA9); // 파란색 (천칭)
+      case InvestmentStyle.aggressive:
+        return Colors.red; // 빨간색 (상향)
+    }
+  }
+
+  /// 투자 스타일 아이콘 가져오기
+  IconData _getStyleIcon(InvestmentStyle style) {
+    switch (style) {
+      case InvestmentStyle.conservative:
+        return Icons.security; // 방패 아이콘
+      case InvestmentStyle.moderate:
+        return Icons.balance; // 천칭 아이콘
+      case InvestmentStyle.aggressive:
+        return Icons.trending_up; // 상향 아이콘
+    }
+  }
+
+  /// 선택된 종목 삭제
+  Future<void> _deleteSelectedItems() async {
+    if (_selectedItems.isEmpty) return;
+    
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('종목 삭제'),
+        content: Text('선택된 ${_selectedItems.length}개 종목을 삭제하시겠습니까?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('삭제'),
+          ),
+        ],
+      ),
+    );
+    
+    if (confirmed == true) {
+      // 관심종목에서 삭제
+      final watchlistRepository = WatchlistRepository();
+      for (final stockCode in _selectedItems) {
+        await watchlistRepository.removeFromWatchlist(stockCode);
+      }
+      
+      // UI 업데이트
+      await _loadWatchlist();
+      setState(() {
+        _selectedItems.clear();
+        _isSelectionMode = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 상태표시줄을 투명하게 설정하여 앱바와 연속되도록 함
+    SystemChrome.setSystemUIOverlayStyle(
+      SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.light,
+        statusBarBrightness: Brightness.dark,
+      ),
+    );
+    
+    final hasApiConfig = KisUnifiedApiService().apiConfig['isValid'] as bool? ?? false;
+    final isHoldingsTab = _tabController.index == 1; // 보유종목 탭인지 확인
+    
+    return Scaffold(
+      appBar: GradientAppBar(
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              '분석',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.5,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Icon(
+              _getStyleIcon(_styleManager.currentStyle),
+              color: Colors.white,
+              size: 24,
+            ),
+            if (_isAutoTradingEnabled) ...[
+              const SizedBox(width: 8),
+              const Text(
+                'AI 자동매매중',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ],
+          ],
+        ),
+        colors: _styleManager.getGradientColors(),
+        actions: [
+          // 새로고침 아이콘 (모든 탭에서 사용 가능)
+          IconButton(
+            onPressed: _refreshAnalysisData,
+            icon: const Icon(Icons.refresh, color: Colors.white),
+            tooltip: '분석 데이터 새로고침',
+          ),
+          // 종가 데이터 확인 버튼 (솔루스첨단소재)
+          IconButton(
+            onPressed: () => _showStockPriceDialog('336370', '솔루스첨단소재'),
+            icon: const Icon(Icons.table_chart, color: Colors.white),
+            tooltip: '솔루스첨단소재 종가 데이터 확인',
+          ),
+          // 보유종목 탭이 아닐 때만 삭제 관련 UI 표시
+          if (!isHoldingsTab) ...[
+            if (_isSelectionMode && _selectedItems.isNotEmpty)
+              TextButton.icon(
+                onPressed: _deleteSelectedItems,
+                icon: const Icon(Icons.delete_outline, color: Colors.white),
+                label: const Text('삭제', style: TextStyle(color: Colors.white)),
+              ),
+            IconButton(
+              onPressed: () {
+                setState(() {
+                  _isSelectionMode = !_isSelectionMode;
+                  if (!_isSelectionMode) {
+                    _selectedItems.clear();
+                  }
+                });
+              },
+              icon: Icon(
+                _isSelectionMode ? Icons.close : Icons.delete_outline,
+                color: Colors.white,
+              ),
+            ),
+          ],
+          // 거래 상태 관리 메뉴
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, color: Colors.white),
+            onSelected: _handleTradeStatusAction,
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'sync',
+                child: Row(
+                  children: [
+                    Icon(Icons.sync, size: 16),
+                    SizedBox(width: 8),
+                    Text('거래 상태 동기화'),
+                  ],
+                ),
+              ),
+                              const PopupMenuItem(
+                  value: 'rebuild',
+                  child: Row(
+                    children: [
+                      Icon(Icons.refresh, size: 16),
+                      SizedBox(width: 8),
+                      Text('거래 상태 재구성'),
+                    ],
+                  ),
+                ),
+              const PopupMenuItem(
+                value: 'detect',
+                child: Row(
+                  children: [
+                    Icon(Icons.search, size: 16),
+                    SizedBox(width: 8),
+                    Text('보유종목 자동감지'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'clear',
+                child: Row(
+                  children: [
+                    Icon(Icons.clear_all, size: 16),
+                    SizedBox(width: 8),
+                    Text('거래 상태 초기화'),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+      body: Padding(
+        padding: EdgeInsets.zero,
+        child: Column(
+          children: [
+            // API 설정 안내
+            if (!hasApiConfig) _buildApiSetupGuide(),
+            
+            // 탭 바
+            Container(
+              color: Colors.white,
+              child: TabBar(
+                controller: _tabController,
+                labelColor: _getStyleColor(_currentStyle),
+                unselectedLabelColor: Colors.grey,
+                indicatorColor: _getStyleColor(_currentStyle),
+                tabs: [
+                  Tab(
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.favorite, size: 16),
+                        const SizedBox(width: 4),
+                        Text('관심종목 (${_watchlistItems.length})'),
+                      ],
+                    ),
+                  ),
+                  Tab(
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.account_balance_wallet, size: 16),
+                        const SizedBox(width: 4),
+                        Text('보유종목 (${_holdingsItems.length})'),
+                      ],
+                    ),
+                  ),
+                  Tab(
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.star, size: 16),
+                        const SizedBox(width: 4),
+                        const Text('추천종목'),
+                      ],
+                    ),
+                  ),
+                  Tab(
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.settings, size: 16),
+                        const SizedBox(width: 4),
+                        const Text('투자스타일 & 백테스트'),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            
+            // 탭 내용
+            Expanded(
+              child: TabBarView(
+                controller: _tabController,
+                children: [
+                  // 관심종목 탭
+                  _buildWatchlistTab(),
+                  // 보유종목 탭
+                  _buildHoldingsTab(),
+                  // 추천종목 탭
+                  _buildRecommendedStocksTab(),
+                  // 투자스타일 & 백테스트 탭
+                  _buildInvestmentStyleAndBacktestTab(),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 관심종목 탭
+  Widget _buildWatchlistTab() {
+    if (_isLoading || _isFirstLoading) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: const [
+            CircularProgressIndicator(),
+            SizedBox(height: 12),
+            Text('관심 종목을 분석중입니다...', style: TextStyle(color: Colors.grey)),
+          ],
+        ),
+      );
+    }
+    
+    if (_watchlistItems.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.favorite_border, 
+              size: MediaQuery.of(context).size.width < 600 ? 48 : 64, 
+              color: Colors.grey
+            ),
+            SizedBox(height: MediaQuery.of(context).size.width < 600 ? 12 : 16),
+            Text(
+              '조건에 맞는 관심종목이 없습니다',
+              style: TextStyle(
+                fontSize: MediaQuery.of(context).size.width < 600 ? 16 : 18, 
+                color: Colors.grey
+              ),
+            ),
+            SizedBox(height: MediaQuery.of(context).size.width < 600 ? 6 : 8),
+            Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: MediaQuery.of(context).size.width < 600 ? 16 : 24
+              ),
+              child: Text(
+                '${_getStyleName(_currentStyle)} 투자 스타일에 맞는 종목만 표시됩니다',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: MediaQuery.of(context).size.width < 600 ? 12 : 14, 
+                  color: Colors.grey
+                ),
+              ),
+            ),
+            SizedBox(height: MediaQuery.of(context).size.width < 600 ? 6 : 8),
+            const Text('우측 상단 새로고침을 눌러 재분석할 수 있어요', style: TextStyle(color: Colors.grey)),
+            SizedBox(height: MediaQuery.of(context).size.width < 600 ? 12 : 16),
+            Container(
+              width: double.infinity,
+              padding: EdgeInsets.symmetric(
+                horizontal: MediaQuery.of(context).size.width < 600 ? 24 : 32
+              ),
+              child: ElevatedButton.icon(
+                onPressed: () async {
+                  await _refreshAllAnalysis();
+                },
+                icon: const Icon(Icons.refresh),
+                label: const Text('새로고침'),
+                style: ElevatedButton.styleFrom(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: MediaQuery.of(context).size.width < 600 ? 24 : 32, 
+                    vertical: MediaQuery.of(context).size.width < 600 ? 12 : 16
+                  ),
+                  minimumSize: Size(double.infinity, MediaQuery.of(context).size.width < 600 ? 40 : 48),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    
+    return RefreshIndicator(
+      onRefresh: () async {
+        await _refreshAllAnalysis();
+      },
+      child: _buildAnalysisList(_watchlistItems),
+    );
+  }
+
+  /// 보유종목 탭
+  Widget _buildHoldingsTab() {
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    
+    final hasApiConfig = KisUnifiedApiService().apiConfig['isValid'] as bool? ?? false;
+    
+    if (!hasApiConfig) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.account_balance_wallet_outlined, size: 64, color: Colors.grey),
+            const SizedBox(height: 16),
+            const Text(
+              'API 설정이 필요합니다',
+              style: TextStyle(fontSize: 18, color: Colors.grey),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              '설정 화면에서 API 키를 등록하면\n보유종목을 확인할 수 있습니다.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 14, color: Colors.grey),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 32.0),
+              child: ElevatedButton.icon(
+                onPressed: () async {
+                  // API 재인증 시도
+                  try {
+                    await KisUnifiedApiService().initialize(
+            appKey: ApiConfig.instance.appKey!,
+            appSecret: ApiConfig.instance.appSecret!,
+            accountNumber: ApiConfig.instance.accountNo!,
+          );
+                    // 재인증 성공 시 보유종목 다시 로드
+                    await _loadHoldings();
+                  } catch (e) {
+                    print('❌ API 재인증 실패: $e');
+                  }
+                },
+                icon: const Icon(Icons.refresh),
+                label: const Text('API 재연결'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 32.0, vertical: 16.0),
+                  minimumSize: const Size(double.infinity, 48.0),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    
+    if (_holdingsItems.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.account_balance_wallet_outlined, size: 64, color: Colors.grey),
+            const SizedBox(height: 16),
+            const Text(
+              '조건에 맞는 보유종목이 없습니다',
+              style: TextStyle(fontSize: 18, color: Colors.grey),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '${_getStyleName(_currentStyle)} 투자 스타일에 맞는 종목만 표시됩니다',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 14, color: Colors.grey),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 32.0),
+              child: ElevatedButton.icon(
+                onPressed: () async {
+                  await _refreshAllAnalysis();
+                },
+                icon: const Icon(Icons.refresh),
+                label: const Text('새로고침'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 32.0, vertical: 16.0),
+                  minimumSize: const Size(double.infinity, 48.0),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    
+    // 보유종목이 있으면 분석 리스트 표시
+    return RefreshIndicator(
+      onRefresh: () async {
+        await _refreshAllAnalysis();
+      },
+      child: _buildAnalysisList(_holdingsItems),
+    );
+  }
+
+  /// 시그널 처리 및 자동매매 실행 (비동기)
+  Future<void> _handleSignalAndAutoTrading(
+    dynamic item,
+    String stockCode,
+    Map<String, dynamic>? analysis,
+    Map<String, dynamic>? currentPriceData,
+  ) async {
+    if (analysis == null) return;
+    
+    final signal = analysis['signal'] as String? ?? '관망';
+    final stockName = analysis['stockName'] as String? ?? '';
+    
+    // 시그널 시간 추적 및 고정
+    if (signal == '매수' || signal == '매도') {
+      final now = DateTime.now();
+      final lastSignal = _lastSignals[stockCode];
+      
+      print('🔍 시그널 처리 중: $stockCode - 현재시그널=$signal, 이전시그널=$lastSignal');
+      
+      // 새로운 시그널이거나 시그널이 변경된 경우에만 시간 기록 (중복 방지)
+      if (lastSignal != signal) {
+        // 중복 시그널 방지 (15분 내 동일 시그널 무시)
+        final lastTimestamp = _signalTimestamps[stockCode];
+        if (lastTimestamp != null) {
+          final timeDiff = now.difference(lastTimestamp);
+          if (timeDiff < const Duration(minutes: 15)) {
+            print('⏱️ 중복 시그널 방지: $stockCode - $signal (${timeDiff.inMinutes}분 전 발생)');
+            return;
+          }
+        }
+        
+        _signalTimestamps[stockCode] = now;
+        _lastSignals[stockCode] = signal;
+        
+        // 자동매매 상태 확인
+        final isAutoTradingEnabled = await AppDataManager.instance.getAutoTradingStatus();
+        print('🔍 자동매매 상태 확인: enabled=$isAutoTradingEnabled');
+        
+        // 자동매매 상태에 따라 시그널 타입 결정
+        String signalType = signal;
+        if (!isAutoTradingEnabled) {
+          signalType = signal == '매수' ? '매수 기회' : '매도 기회';
+          print('📊 자동매매 OFF - 시그널 타입 변경: $signal → $signalType');
+        }
+        
+        // 시그널 추적은 AutoTradingCycle에서 처리하므로 여기서는 건너뜀
+        print('🎯 분석탭 시그널 감지: $stockCode ($stockName) - $signalType (${now.hour}:${now.minute.toString().padLeft(2, '0')})');
+        print('⚠️ 분석탭 시그널은 AutoTradingCycle에서 처리됨: $stockCode $signal');
+      } else {
+        print('ℹ️ 시그널 중복 무시: $stockCode - $signal (이전과 동일)');
+      }
+    }
+  }
+
+  /// 분석 리스트 공통 위젯
+  Widget _buildAnalysisList(List<dynamic> items) {
+    return FutureBuilder<Map<String, dynamic>>(
+      future: _styleManager.getStyleParameters(_currentStyle),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        
+        final styleParams = snapshot.data ?? {};
+        final rsiCondition = (styleParams['rsiCondition'] as num?)?.toDouble();
+        final thresholds = {
+          'rsiOversold': rsiCondition ?? 30.0,
+          'rsiOverbought': 100.0 - (rsiCondition ?? 30.0),
+        };
+        
+        // 현재 탭에 따라 적절한 스크롤 컨트롤러 선택
+        final scrollController = _tabController.index == 0 ? _watchlistScrollController : _holdingsScrollController;
+        
+        return ListView.builder(
+          controller: scrollController,
+          padding: const EdgeInsets.all(16),
+          itemCount: items.length,
+          itemBuilder: (context, index) {
+            final item = items[index];
+            final stockCode = item['stock_code'] as String? ?? item['stockCode'] as String? ?? '';
+            
+            if (stockCode.isEmpty) return const SizedBox.shrink();
+            
+            final currentPriceData = _currentPrices[stockCode];
+            final analysis = _analysisResults[stockCode];
+            final isSelected = _selectedItems.contains(stockCode);
+            
+            // 시그널 처리 (자동매매 ON/OFF 관계없이 분석은 계속)
+            // UI 렌더링에서 시그널 처리 로직 제거 (실시간 분석 타이머에서만 처리)
+            // _handleSignalAndAutoTrading(item, stockCode, analysis, currentPriceData);
+            
+            // 분석 결과가 없으면 로딩 상태 표시
+            Map<String, dynamic>? displayAnalysis = analysis;
+            if (analysis == null) {
+              // 분석 결과가 없으면 로딩 중임을 표시
+              displayAnalysis = {
+                'currentPrice': 0.0,
+                'prevClose': 0.0,
+                'avgPrice': 0.0,
+                'profit': 0.0,
+                'profitRate': 0.0,
+                'signal': '분석 중...',
+                'confidence': 0.0,
+                'targetPrice': 0.0,
+                'reason': '데이터 수집 및 분석 중입니다.',
+                'buyThreshold': (styleParams['buyThreshold'] as num?)?.toDouble() ?? 0.3,
+                'sellThreshold': (styleParams['sellThreshold'] as num?)?.toDouble() ?? -0.3,
+                'indicators': {
+                  'rsi': null,
+                  'macd': null,
+                  'bollinger': null,
+                  'sma20': null,
+                  'volume': null,
+                  'momentum': null,
+                  'vix': null,
+                  'volumePriceDivergence': null,
+                  'bidAskImbalance': null,
+                  'smartMoneyFlow': null,
+                },
+                'signals': [
+                  {
+                    'name': '계산 오류',
+                    'signal': '계산 오류',
+                    'value': null,
+                    'reason': '데이터 부족',
+                    'description': '지표 계산을 위한 데이터가 부족합니다.',
+                  },
+                ],
+                'metConditions': 0,
+                'totalConditions': 7,
+                'stockName': item['stockName'] ?? item['stock_name'] ?? stockCode,
+                'stockCode': stockCode,
+                'investmentStyle': _getStyleName(_styleManager.currentStyle),
+                'isLoading': true, // 로딩 상태 표시
+              };
+              
+              print('⏳ 분석 결과 없음 ($stockCode): 로딩 상태로 표시');
+            }
+            
+            return _buildAnalysisCard(
+              item,
+              currentPriceData,
+              displayAnalysis,
+              isSelected,
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// API 설정 안내
+  Widget _buildApiSetupGuide() {
+    return Container(
+      margin: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.orange[50],
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.orange[200]!),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.warning_amber, color: Colors.orange[700], size: 24),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'API 설정이 필요합니다',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.orange[700],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            '실시간 분석과 보유종목 확인을 위해 KIS API 설정이 필요합니다.',
+            style: TextStyle(
+              fontSize: 14,
+              color: Colors.orange[600],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '• 설정 화면에서 API 키 등록\n• 계좌번호 및 앱키 설정\n• 실시간 데이터 조회 가능',
+            style: TextStyle(
+              fontSize: 12,
+              color: Colors.orange[600],
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 분석 카드
+  Widget _buildAnalysisCard(
+    dynamic item,
+    Map<String, dynamic>? currentPriceData,
+    Map<String, dynamic>? analysisData,
+    bool isSelected,
+  ) {
+    final hasApiConfig = KisUnifiedApiService().apiConfig['isValid'] as bool? ?? false;
+    
+    // 보유종목인지 확인
+    final stockCode = item['stock_code'] as String? ?? item['stockCode'] as String? ?? '';
+    final hasQuantity = item.containsKey('quantity') || item.containsKey('avgPrice');
+    final isHolding = hasQuantity && (item['quantity'] ?? 0) > 0;
+    
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      elevation: 2,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: isSelected ? BorderSide(color: Colors.lightBlue, width: 2) : BorderSide.none,
+      ),
+      child: Stack(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 종목 정보 및 현재가
+                _buildStockHeader(item, currentPriceData),
+                const SizedBox(height: 16),
+
+                // 보유종목 정보 (실제 보유종목 또는 해외 보유 병합 케이스를 위해 나스닥 종목도 표시)
+                if (isHolding || _isNasdaqStock(stockCode)) _buildHoldingsInfo(item, analysisData),
+                if (isHolding || _isNasdaqStock(stockCode)) const SizedBox(height: 12),
+
+                // 투자 스타일 정보
+                if (analysisData != null) _buildInvestmentStyleInfo(analysisData),
+                const SizedBox(height: 12),
+
+                // AI 분석 결과
+                if (analysisData != null) _buildAnalysisSection(item, analysisData),
+                
+                // 로딩 상태 표시
+                if (analysisData != null && (analysisData['isLoading'] == true || analysisData['signal'] == '분석 중...')) 
+                  _buildLoadingSection(),
+                const SizedBox(height: 16),
+
+                // API 설정이 없을 때 안내 메시지
+                if (!hasApiConfig) _buildNoApiMessage(),
+                
+                // 기술적 지표 조건 부합 여부 (API 설정과 관계없이 표시)
+                if (analysisData != null) 
+                  FutureBuilder<Widget>(
+                    future: _buildTechnicalIndicatorsSection(analysisData),
+                    builder: (context, snapshot) {
+                      if (snapshot.hasData) {
+                        return snapshot.data!;
+                      }
+                      return const SizedBox.shrink();
+                    },
+                  ),
+                const SizedBox(height: 12),
+
+                // 분석 시간 정보
+                if (analysisData != null) _buildAnalysisTimeInfo(analysisData),
+                
+                // 시그널 시간 정보 (매수/매도 시그널이 있을 때만)
+                if (analysisData != null) _buildSignalTimeInfo(stockCode, analysisData),
+              ],
+            ),
+          ),
+          // 선택된 경우 하늘색 오버레이
+          if (isSelected)
+            Positioned.fill(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.lightBlue.withOpacity(0.3),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          // 거래 상태 오버레이
+          _buildTradeStatusOverlay(stockCode),
+          // 정규장 시간 오버레이
+          _buildTradingTimeOverlay(stockCode),
+          // 체크박스 (중앙) - 보유종목 탭이 아닐 때만 표시
+          if (_isSelectionMode && _tabController.index != 1)
+            Positioned.fill(
+              child: Center(
+                child: Transform.scale(
+                  scale: 1.8,
+                  child: Checkbox(
+                    value: isSelected,
+                    onChanged: (value) {
+                      setState(() {
+                        if (stockCode.isNotEmpty) {
+                          if (value == true) {
+                            _selectedItems.add(stockCode);
+                          } else {
+                            _selectedItems.remove(stockCode);
+                          }
+                        }
+                      });
+                    },
+                    activeColor: const Color(0xFF3B5BA9),
+                    shape: const CircleBorder(),
+                    side: const BorderSide(color: Colors.grey, width: 1.5),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStockHeader(dynamic item, Map<String, dynamic>? currentPriceData) {
+    // 보유종목과 관심종목의 키 구조가 다름
+    final stockCode = item['stock_code'] as String? ?? 
+                     item['stockCode'] as String? ?? '';
+    final stockName = _getDisplayName(item);
+    
+    print('🔍 _buildStockHeader 디버그:');
+    print('  - item 키들: ${item.keys.toList()}');
+    print('  - stockCode: $stockCode');
+    print('  - stockName: $stockName');
+    
+    // 분석 결과에서 현재가/전일가 가져오기
+    final analysis = _analysisResults[stockCode];
+    final currentPrice = analysis?['currentPrice'] ?? currentPriceData?['currentPrice'] ?? 0.0;
+    final prevClose = analysis?['prevClose'] ?? currentPriceData?['prevClose'] ?? currentPrice;
+
+    // 가격 변화 계산
+    final priceChange = currentPrice - prevClose;
+    final priceChangePercent = prevClose > 0 ? (priceChange / prevClose) * 100 : 0.0;
+
+    // 나스닥 종목인지 확인
+    final isNasdaq = _isNasdaqStock(stockCode);
+    
+    // 가격 표시 형식 결정
+    String currentPriceText;
+    String prevCloseText;
+    String changeText;
+    String currency;
+    
+    if (isNasdaq) {
+      currentPriceText = '\$${currentPrice.toStringAsFixed(2)}';
+      prevCloseText = '\$${prevClose.toStringAsFixed(2)}';
+      changeText = '${priceChange >= 0 ? '+' : ''}\$${priceChange.toStringAsFixed(2)} (${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toStringAsFixed(2)}%)';
+      currency = 'USD';
+    } else {
+      currentPriceText = Formatters.formatPrice(currentPrice);
+      prevCloseText = Formatters.formatPrice(prevClose);
+      changeText = '${priceChange >= 0 ? '+' : ''}${Formatters.formatPrice(priceChange)} (${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toStringAsFixed(2)}%)';
+      currency = 'KRW';
+    }
+
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 종목명 (큰 글씨, 볼드)
+              Text(
+                stockName,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              // 종목코드 (작은 글씨, 회색)
+              Text(
+                stockCode,
+                style: const TextStyle(
+                  fontSize: 14,
+                  color: Colors.grey,
+                ),
+              ),
+            ],
+          ),
+        ),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            // 현재가
+            Text(
+              currentPrice > 0 ? currentPriceText : 'N/A',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: currentPrice > 0 ? (currentPrice >= prevClose ? Colors.red : Colors.blue) : Colors.grey,
+              ),
+            ),
+            // 가격 변화
+            if (currentPrice > 0 && prevClose > 0)
+              Text(
+                changeText,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: priceChange >= 0 ? Colors.red : Colors.blue,
+                ),
+              ),
+            // 전일가
+            Text(
+              prevClose > 0 ? '전일: $prevCloseText' : '',
+              style: const TextStyle(
+                fontSize: 12,
+                color: Colors.grey,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// 나스닥 종목인지 확인 (실제 데이터베이스 market 필드 사용)
+  bool _isNasdaqStock(String stockCode) {
+    // 관심종목에서 해당 종목의 market 정보 확인
+    final watchlistItem = _watchlistItems.firstWhere(
+      (item) => item['stock_code'] == stockCode,
+      orElse: () => <String, dynamic>{},
+    );
+    
+    // 보유종목에서 해당 종목의 market 정보 확인
+    final holdingItem = _holdingsItems.firstWhere(
+      (item) => item['stockCode'] == stockCode,
+      orElse: () => <String, dynamic>{},
+    );
+    
+    // market이 'NASDAQ'이면 나스닥 종목
+    final dynamic marketRaw = watchlistItem['market'] ?? holdingItem['market'];
+    final String? market = marketRaw is String ? marketRaw : null;
+
+    // AppDataManager에서 보조 정보 확인
+    String? marketFromInfo;
+    try {
+      final info = AppDataManager.instance.getStockInfo(stockCode);
+      final dynamic m = info?['market'];
+      marketFromInfo = m is String ? m : null;
+    } catch (_) {}
+
+    final String marketUpper = (market ?? marketFromInfo ?? '').toUpperCase();
+    final String code = stockCode.trim().toUpperCase();
+
+    // 미국 시장 코드 전반을 달러 표기로 처리 (NASDAQ, NASD, NYSE, AMEX 등)
+    final bool isUsMarket = marketUpper == 'NASDAQ' ||
+        marketUpper == 'NASD' ||
+        marketUpper == 'NYSE' ||
+        marketUpper == 'AMEX' ||
+        marketUpper == 'US' ||
+        marketUpper == 'USA';
+
+    // 패턴 기반 휴리스틱
+    // - 전부 대문자 알파벳/점(.) 1~10자리 → 미국 티커로 간주 (예: BRK.B)
+    // - 하나라도 알파벳이 포함되고 전체가 숫자만은 아님 → 미국 티커로 간주
+    final bool isLikelyUsTicker =
+        RegExp(r'^[A-Z\.]{1,10}$').hasMatch(code) ||
+        (RegExp(r'[A-Z]').hasMatch(code) && !RegExp(r'^\d+$').hasMatch(code));
+
+    final bool isNasdaq = isUsMarket || isLikelyUsTicker;
+
+    // 디버그 로그 (필요시에만 출력)
+    if (code.startsWith('A') || code.startsWith('Q') || code.startsWith('T') || code.startsWith('N')) {
+      print('🔍 나스닥/미국 종목 확인: $code -> market=$marketUpper, isUsMarket=$isUsMarket, heuristic=$isLikelyUsTicker, result=$isNasdaq');
+    }
+    
+    return isNasdaq;
+  }
+
+  /// 보유종목 정보 표시
+  Widget _buildHoldingsInfo(Map<String, dynamic> holding, Map<String, dynamic>? analysis) {
+    // 보유종목 데이터에서 정보 추출 (다양한 키 구조 지원)
+    final quantity = (holding['quantity'] ?? holding['qty'] ?? holding['quantity'] ?? 0).toString();
+    final avgPrice = (holding['avgPrice'] ?? holding['avg_price'] ?? holding['avgPrice'] ?? 0.0).toDouble();
+    final profit = (holding['profit'] ?? holding['profitLoss'] ?? holding['profit'] ?? 0.0).toDouble();
+    final profitRate = (holding['profitRate'] ?? holding['profit_rate'] ?? holding['profitRate'] ?? 0.0).toDouble();
+    
+    // 현재가 정보 (분석 결과 또는 보유종목 데이터에서)
+    final stockCode = holding['stockCode'] as String? ?? holding['stock_code'] as String? ?? '';
+    final currentPrice = analysis?['currentPrice'] ?? 
+                        (holding['currentPrice'] ?? holding['current_price'] ?? 0.0).toDouble();
+    
+    // 나스닥 종목인지 확인
+    final isNasdaq = _isNasdaqStock(stockCode);
+    
+    // 디버깅 정보 출력
+    print('🔍 보유종목 정보 디버깅 ($stockCode):');
+    print('  - quantity: $quantity');
+    print('  - avgPrice: $avgPrice');
+    print('  - profit: $profit');
+    print('  - profitRate: $profitRate');
+    print('  - currentPrice: $currentPrice');
+    print('  - holding keys: ${holding.keys.toList()}');
+    
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.grey[50],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.grey[300]!),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.account_balance_wallet, size: 16, color: Colors.blue[600]),
+              const SizedBox(width: 4),
+              Text(
+                '보유 정보',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blue[600],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '보유수량: $quantity주',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      isNasdaq ? '평균단가: \$${avgPrice.toStringAsFixed(2)}' : '평균단가: ${Formatters.formatPrice(avgPrice)}',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                  ],
+                ),
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    isNasdaq ? '${profit >= 0 ? '+' : ''}\$${profit.toStringAsFixed(2)}' : '${profit >= 0 ? '+' : ''}${Formatters.formatPrice(profit)}',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: profit >= 0 ? Colors.red : Colors.blue,
+                    ),
+                  ),
+                  Text(
+                    '${profitRate >= 0 ? '+' : ''}${profitRate.toStringAsFixed(2)}%',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: profitRate >= 0 ? Colors.red : Colors.blue,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAnalysisSection(dynamic item, Map<String, dynamic> analysis) {
+    final confidence = analysis['confidence'] ?? 0.0;
+    final targetPrice = analysis['targetPrice'] ?? 0.0;
+    final signal = analysis['signal'] ?? '관망';
+    final reason = analysis['reason'] ?? '';
+    final signals = analysis['signals'] as List<dynamic>? ?? [];
+    final analysisTime = analysis['analysisTime'] ?? '';
+    final analysisPrice = analysis['analysisPrice'] ?? 0.0;
+    
+    // 개별 지표 점수에서 시그널 생성
+    final individualScores = analysis['individualScores'] as Map<String, dynamic>? ?? {};
+    final comprehensiveScore = (analysis['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
+    
+    // 투자 스타일 임계값 가져오기 (로컬DB에서만)
+    final buyThreshold = (analysis['buyThreshold'] as num?)?.toDouble();
+    final sellThreshold = (analysis['sellThreshold'] as num?)?.toDouble();
+    
+    if (buyThreshold == null || sellThreshold == null) {
+      print('⚠️ 투자 스타일 임계값이 설정되지 않았습니다.');
+      return Container(); // 빈 컨테이너 반환
+    }
+    
+    // 종합 점수 기반 시그널 결정
+    String finalSignal = '관망';
+    if (comprehensiveScore >= buyThreshold) {
+      finalSignal = '매수';
+    } else if (comprehensiveScore <= sellThreshold) {
+      finalSignal = '매도';
+    } else {
+      // 임계값 사이 구간: 관망
+      finalSignal = '관망';
+    }
+    
+    // 개별 지표 시그널 생성
+    final List<Map<String, dynamic>> generatedSignals = [];
+    individualScores.forEach((indicatorName, score) {
+      final scoreValue = (score as num?)?.toDouble() ?? 0.0;
+      String indicatorSignal = '관망';
+      if (scoreValue > buyThreshold) {
+        indicatorSignal = '매수';
+      } else if (scoreValue <= sellThreshold) {
+        indicatorSignal = '매도';
+      }
+      
+      generatedSignals.add({
+        'name': indicatorName,
+        'signal': indicatorSignal,
+        'score': scoreValue,
+      });
+    });
+    
+    print('📊 일봉 분석 결과 디버깅:');
+    print('  - comprehensiveScore: $comprehensiveScore');
+    print('  - buyThreshold: $buyThreshold');
+    print('  - sellThreshold: $sellThreshold');
+    print('  - finalSignal: $finalSignal');
+    print('  - generatedSignals: $generatedSignals');
+
+    // 나스닥 종목인지 확인
+    final stockCode = item['stock_code'] as String? ?? item['stockCode'] as String? ?? '';
+    final isNasdaq = _isNasdaqStock(stockCode);
+    
+    // 목표가 표시 형식 결정
+    String targetPriceText;
+    if (isNasdaq) {
+      targetPriceText = '\$${targetPrice.toStringAsFixed(2)}';
+    } else {
+      targetPriceText = Formatters.formatPrice(targetPrice);
+    }
+
+    Color signalColor;
+    String signalIcon;
+    
+    switch (finalSignal) {
+      case '매수':
+        signalColor = Colors.red;
+        signalIcon = '↗';
+        break;
+      case '매도':
+        signalColor = Colors.blue;
+        signalIcon = '↘';
+        break;
+      default:
+        signalColor = Colors.grey;
+        signalIcon = '-';
+    }
+
+    // 시그널 개수 계산 (생성된 시그널 사용)
+    final buySignals = generatedSignals.where((s) => s['signal'] == '매수').length;
+    final sellSignals = generatedSignals.where((s) => s['signal'] == '매도').length;
+    final totalSignals = generatedSignals.length;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text(
+              '일봉 분석 결과',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const Spacer(),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: signalColor.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                finalSignal,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: signalColor,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        
+        // 시그널 요약을 일봉 분석 결과에 통합
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: signalColor.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: signalColor.withOpacity(0.3)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    finalSignal == '매수' ? Icons.trending_up : 
+                    finalSignal == '매도' ? Icons.trending_down : 
+                    Icons.remove,
+                    color: signalColor,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildColoredSignalSummary(analysis),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        
+        const SizedBox(height: 12),
+        
+
+        
+        const SizedBox(height: 12),
+        
+        Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.verified, color: Colors.blue, size: 16),
+                      const SizedBox(width: 4),
+                      Text(
+                        '신뢰도',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.blue,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${(confidence <= 1.0 ? confidence * 100 : confidence).toStringAsFixed(0)}%',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.blue,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.track_changes, color: Colors.green, size: 16),
+                      const SizedBox(width: 4),
+                      Text(
+                        '목표가',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.green,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    targetPrice > 0 ? targetPriceText : 'N/A',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: targetPrice > 0 ? Colors.green : Colors.grey,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+
+      ],
+    );
+  }
+
+  /// 시그널 요약 생성 (개별 지표 점수 기반)
+  Widget _buildColoredSignalSummary(Map<String, dynamic> analysis) {
+    // 상세 분석 결과가 있으면 사용
+    final detailedAnalysis = analysis['detailedAnalysis'] as Map<String, dynamic>? ?? {};
+    
+    // 개별 지표 점수에서 시그널 생성
+    final individualScores = analysis['individualScores'] as Map<String, dynamic>? ?? {};
+    final comprehensiveScore = (analysis['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
+    
+    // 로컬DB에서 실제 사용자 설정 임계값 가져오기
+    final buyThreshold = (analysis['buyThreshold'] as num?)?.toDouble();
+    final sellThreshold = (analysis['sellThreshold'] as num?)?.toDouble();
+    
+    if (buyThreshold == null || sellThreshold == null) {
+      print('⚠️ 투자 스타일 임계값이 설정되지 않았습니다.');
+      return Container();
+    }
+    
+    // 개별 지표 시그널 생성
+    final List<Map<String, dynamic>> signals = [];
+    individualScores.forEach((indicatorName, score) {
+      final scoreValue = (score as num?)?.toDouble() ?? 0.0;
+      String signal = '관망';
+      if (scoreValue > buyThreshold) {
+        signal = '매수';
+      } else if (scoreValue < sellThreshold) {
+        signal = '매도';
+      }
+      
+      // 상세 분석 결과에서 실제 값과 상세한 이유 가져오기
+      final indicatorKey = _getIndicatorKey(indicatorName);
+      final indicatorAnalysis = detailedAnalysis[indicatorKey];
+      
+      String detailedReason = '';
+      String actualValue = '';
+      
+      if (indicatorAnalysis != null) {
+        detailedReason = indicatorAnalysis['analysis'] as String? ?? '';
+      }
+      
+      // 실제 기술적 데이터에서 값 가져오기
+      actualValue = _getActualValueText(indicatorName, analysis);
+      
+      // 상세 분석이 없으면 기존 로직 사용
+      if (detailedReason.isEmpty) {
+        detailedReason = _generateDetailedReason(indicatorName, scoreValue, signal, analysis);
+      }
+      
+      signals.add({
+        'name': _getKoreanIndicatorName(indicatorName),
+        'signal': signal,
+        'score': scoreValue,
+        'actualValue': actualValue,
+        'reason': detailedReason,
+      });
+    });
+    
+    if (signals.isEmpty) {
+      return const Text(
+        '시그널 없음',
+        style: TextStyle(
+          fontSize: 12,
+          color: Colors.grey,
+          fontWeight: FontWeight.w500,
+        ),
+      );
+    }
+    
+    // 매수/매도/관망 시그널 분리
+    final buySignals = signals.where((s) => s['signal'] == '매수').toList();
+    final sellSignals = signals.where((s) => s['signal'] == '매도').toList();
+    final neutralSignals = signals.where((s) => s['signal'] == '관망').toList();
+    
+    final List<Widget> summaryParts = [];
+    
+    // 매수 시그널 상세 표시
+    if (buySignals.isNotEmpty) {
+      summaryParts.add(Text(
+        '${buySignals.length}개 매수 시그널:',
+        style: const TextStyle(
+          fontSize: 12,
+          color: Colors.red,
+          fontWeight: FontWeight.bold,
+        ),
+      ));
+      
+      for (final signal in buySignals) {
+        final name = signal['name'] as String? ?? '';
+        final actualValue = signal['actualValue'] as String? ?? '';
+        final reason = signal['reason'] as String? ?? '';
+        
+        summaryParts.add(Padding(
+          padding: const EdgeInsets.only(left: 8, top: 2),
+          child: Text(
+            '• $name: $actualValue - $reason',
+            style: const TextStyle(
+              fontSize: 11,
+              color: Colors.red,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ));
+      }
+    }
+    
+    // 매도 시그널 상세 표시
+    if (sellSignals.isNotEmpty) {
+      summaryParts.add(Text(
+        '${sellSignals.length}개 매도 시그널:',
+        style: const TextStyle(
+          fontSize: 12,
+          color: Colors.blue,
+          fontWeight: FontWeight.bold,
+        ),
+      ));
+      
+      for (final signal in sellSignals) {
+        final name = signal['name'] as String? ?? '';
+        final actualValue = signal['actualValue'] as String? ?? '';
+        final reason = signal['reason'] as String? ?? '';
+        
+        summaryParts.add(Padding(
+          padding: const EdgeInsets.only(left: 8, top: 2),
+          child: Text(
+            '• $name: $actualValue - $reason',
+            style: const TextStyle(
+              fontSize: 11,
+              color: Colors.blue,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ));
+      }
+    }
+    
+    // 관망 시그널 상세 표시
+    if (neutralSignals.isNotEmpty) {
+      summaryParts.add(Text(
+        '${neutralSignals.length}개 관망 시그널:',
+        style: const TextStyle(
+          fontSize: 12,
+          color: Colors.grey,
+          fontWeight: FontWeight.bold,
+        ),
+      ));
+      
+      for (final signal in neutralSignals) {
+        final name = signal['name'] as String? ?? '';
+        final actualValue = signal['actualValue'] as String? ?? '';
+        final reason = signal['reason'] as String? ?? '';
+        
+        summaryParts.add(Padding(
+          padding: const EdgeInsets.only(left: 8, top: 2),
+          child: Text(
+            '• $name: $actualValue - $reason',
+            style: const TextStyle(
+              fontSize: 11,
+              color: Colors.grey,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ));
+      }
+    }
+    
+    if (summaryParts.isEmpty) {
+      return const Text(
+        '시그널 없음',
+        style: TextStyle(
+          fontSize: 12,
+          color: Colors.grey,
+          fontWeight: FontWeight.w500,
+        ),
+      );
+    }
+    
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: summaryParts,
+    );
+  }
+
+  /// 지표별 상세한 이유 생성 (한글)
+  String _generateDetailedReason(String indicatorName, double score, String signal, Map<String, dynamic> analysis) {
+    // 상세 분석 결과가 있으면 사용
+    final detailedAnalysis = analysis['detailedAnalysis'] as Map<String, dynamic>? ?? {};
+    
+    // 지표명 매핑
+    final indicatorKey = _getIndicatorKey(indicatorName);
+    final indicatorAnalysis = detailedAnalysis[indicatorKey];
+    
+    if (indicatorAnalysis != null && indicatorAnalysis['analysis'] != null) {
+      return indicatorAnalysis['analysis'] as String;
+    }
+    
+    // 상세 분석이 없으면 기존 로직 사용
+    final currentPrice = (analysis['currentPrice'] as num?)?.toDouble() ?? 0.0;
+    final prevClose = (analysis['prevClose'] as num?)?.toDouble() ?? currentPrice;
+    final technicalData = analysis['technicalData'] as Map<String, dynamic>? ?? {};
+    
+    // 가격 변화율 계산
+    final priceChangePercent = prevClose > 0 ? ((currentPrice - prevClose) / prevClose) * 100 : 0.0;
+    
+    // 지표명 한글화 매핑
+    final koreanName = _getKoreanIndicatorName(indicatorName);
+    
+    switch (indicatorName.toLowerCase()) {
+      case 'rsi':
+        // 실제 분석된 RSI 값 사용
+        final rsiValue = (technicalData['rsi'] as num?)?.toDouble();
+        if (rsiValue == null || rsiValue == 0.0) {
+          return 'RSI 데이터 부족 - 관망 권장';
+        }
+        
+        if (signal == '매수') {
+          if (rsiValue <= 30) {
+            return 'RSI ${rsiValue.toStringAsFixed(1)} (과매도 구간) - 반등 기대, 매수 기회';
+          } else if (rsiValue <= 40) {
+            return 'RSI ${rsiValue.toStringAsFixed(1)} (매수 구간) - 매수 신호';
+          } else if (rsiValue <= 50) {
+            return 'RSI ${rsiValue.toStringAsFixed(1)} (중립선 하회) - 매수 신호';
+          } else {
+            return 'RSI ${rsiValue.toStringAsFixed(1)} (상승 추세) - 매수 신호';
+          }
+        } else if (signal == '매도') {
+          if (rsiValue >= 70) {
+            return 'RSI ${rsiValue.toStringAsFixed(1)} (과매수 구간) - 하락 예상, 매도 권장';
+          } else if (rsiValue >= 60) {
+            return 'RSI ${rsiValue.toStringAsFixed(1)} (매도 구간) - 매도 신호';
+          } else if (rsiValue >= 50) {
+            return 'RSI ${rsiValue.toStringAsFixed(1)} (중립선 상회) - 매도 신호';
+          } else {
+            return 'RSI ${rsiValue.toStringAsFixed(1)} (하락 추세) - 매도 신호';
+          }
+        } else {
+          return 'RSI ${rsiValue.toStringAsFixed(1)} (중립 구간) - 관망';
+        }
+        
+      case 'macd':
+        final macdValue = (technicalData['macd'] as num?)?.toDouble();
+        final signalValue = (technicalData['signal'] as num?)?.toDouble();
+        
+        if (macdValue == null || signalValue == null) {
+          return 'MACD 데이터 부족 - 관망 권장';
+        }
+        
+        final histogram = macdValue - signalValue;
+        
+        if (signal == '매수') {
+          if (histogram > 0) {
+            return 'MACD ${macdValue.toStringAsFixed(3)} > 신호선 ${signalValue.toStringAsFixed(3)} (상승) - 매수 신호';
+          } else {
+            return 'MACD ${macdValue.toStringAsFixed(3)} < 신호선 ${signalValue.toStringAsFixed(3)} (골든크로스 예상) - 매수 신호';
+          }
+        } else if (signal == '매도') {
+          if (histogram < 0) {
+            return 'MACD ${macdValue.toStringAsFixed(3)} < 신호선 ${signalValue.toStringAsFixed(3)} (하락) - 매도 신호';
+          } else {
+            return 'MACD ${macdValue.toStringAsFixed(3)} > 신호선 ${signalValue.toStringAsFixed(3)} (데드크로스 예상) - 매도 신호';
+          }
+        } else {
+          return 'MACD ${macdValue.toStringAsFixed(3)} ≈ 신호선 ${signalValue.toStringAsFixed(3)} (중립) - 관망';
+        }
+        
+      case '볼린저밴드':
+        final bbUpper = (technicalData['bbUpper'] as num?)?.toDouble();
+        final bbLower = (technicalData['bbLower'] as num?)?.toDouble();
+        final bbMiddle = (technicalData['bbMiddle'] as num?)?.toDouble();
+        
+        if (bbUpper == null || bbLower == null || bbMiddle == null) {
+          return '가격 변동성이 낮아 분석이 어려움 - 관망 권장';
+        }
+        
+        // 현재가가 볼린저밴드의 어느 위치에 있는지 계산
+        final bandWidth = bbUpper - bbLower;
+        final position = bandWidth > 0 ? ((currentPrice - bbLower) / bandWidth) * 100 : 50.0;
+        
+        if (signal == '매수') {
+          if (currentPrice <= bbLower) {
+            return '현재가 \$${_formatNumber(currentPrice)}이 하단 지지선 \$${_formatNumber(bbLower)}에 닿아 반등 기대 - 매수 기회';
+          } else if (position < 30) {
+            return '현재가 \$${_formatNumber(currentPrice)}이 하단 근처 (${position.toStringAsFixed(0)}% 위치) - 저점 매수 기회';
+          } else {
+            return '현재가 \$${_formatNumber(currentPrice)}이 중간선 \$${_formatNumber(bbMiddle)} 위로 상승 중 - 매수 신호';
+          }
+        } else if (signal == '매도') {
+          if (currentPrice >= bbUpper) {
+            return '현재가 \$${_formatNumber(currentPrice)}이 상단 저항선 \$${_formatNumber(bbUpper)}에 닿아 하락 예상 - 매도 권장';
+          } else if (position > 70) {
+            return '현재가 \$${_formatNumber(currentPrice)}이 상단 근처 (${position.toStringAsFixed(0)}% 위치) - 고점 매도 기회';
+          } else {
+            return '현재가 \$${_formatNumber(currentPrice)}이 중간선 \$${_formatNumber(bbMiddle)} 아래로 하락 중 - 매도 신호';
+          }
+        } else {
+          return '현재가 \$${_formatNumber(currentPrice)}이 중간선 \$${_formatNumber(bbMiddle)} 근처 (${position.toStringAsFixed(0)}% 위치) - 관망';
+        }
+        
+      case '이동평균선':
+        final ma5 = (technicalData['ma5'] as num?)?.toDouble();
+        final ma20 = (technicalData['ma20'] as num?)?.toDouble();
+        final ma60 = (technicalData['ma60'] as num?)?.toDouble();
+        
+        if (ma5 == null || ma20 == null || ma60 == null) {
+          return '이동평균선 데이터 부족 - 관망 권장';
+        }
+        
+        if (signal == '매수') {
+          if (currentPrice > ma5 && ma5 > ma20 && ma20 > ma60) {
+            return '현재가 \$${_formatNumber(currentPrice)}이 모든 이동평균선 위 (MA5: \$${_formatNumber(ma5)}, MA20: \$${_formatNumber(ma20)}) - 강한 상승 추세, 매수 기회';
+          } else if (currentPrice > ma20) {
+            return '현재가 \$${_formatNumber(currentPrice)}이 20일 평균선 \$${_formatNumber(ma20)} 위로 돌파 - 상승 신호';
+          } else if (ma5 > ma20) {
+            return '단기 평균선 \$${_formatNumber(ma5)}이 장기 평균선 \$${_formatNumber(ma20)} 위로 상승 - 매수 신호';
+          } else {
+            return '이동평균선이 상승 추세로 전환 중 - 매수 고려';
+          }
+        } else if (signal == '매도') {
+          if (currentPrice < ma5 && ma5 < ma20 && ma20 < ma60) {
+            return '현재가 \$${_formatNumber(currentPrice)}이 모든 이동평균선 아래 (MA5: \$${_formatNumber(ma5)}, MA20: \$${_formatNumber(ma20)}) - 강한 하락 추세, 매도 권장';
+          } else if (currentPrice < ma20) {
+            return '현재가 \$${_formatNumber(currentPrice)}이 20일 평균선 \$${_formatNumber(ma20)} 아래로 하락 - 매도 신호';
+          } else if (ma5 < ma20) {
+            return '단기 평균선 \$${_formatNumber(ma5)}이 장기 평균선 \$${_formatNumber(ma20)} 아래로 하락 - 매도 신호';
+          } else {
+            return '이동평균선이 하락 추세로 전환 중 - 매도 고려';
+          }
+        } else {
+          return '현재가 \$${_formatNumber(currentPrice)}이 20일 평균선 \$${_formatNumber(ma20)} 근처 - 관망';
+        }
+        
+      case '거래량':
+        final currentVolume = (technicalData['currentVolume'] as num?)?.toInt();
+        final avgVolume = (technicalData['avgVolume'] as num?)?.toDouble();
+        
+        if (currentVolume == null || avgVolume == null) {
+          return '거래량 데이터 부족 - 관망 권장';
+        }
+        
+        final volumeRatio = avgVolume > 0 ? currentVolume / avgVolume : 1.0;
+        
+        if (signal == '매수') {
+          if (volumeRatio > 2.0) {
+            return '거래량이 평균의 ${volumeRatio.toStringAsFixed(1)}배로 급증 (${_formatNumber(currentVolume)}주) - 강한 매수 신호';
+          } else if (volumeRatio > 1.5) {
+            return '거래량이 평균의 ${volumeRatio.toStringAsFixed(1)}배로 증가 (${_formatNumber(currentVolume)}주) - 매수 신호';
+          } else if (priceChangePercent > 0) {
+            return '거래량 ${_formatNumber(currentVolume)}주로 가격 상승 동반 - 매수 신호';
+          } else {
+            return '거래량 ${_formatNumber(currentVolume)}주로 상승 추세 - 매수 고려';
+          }
+        } else if (signal == '매도') {
+          if (volumeRatio > 2.0) {
+            return '거래량이 평균의 ${volumeRatio.toStringAsFixed(1)}배로 급증 (${_formatNumber(currentVolume)}주) - 강한 매도 신호';
+          } else if (volumeRatio > 1.5) {
+            return '거래량이 평균의 ${volumeRatio.toStringAsFixed(1)}배로 증가 (${_formatNumber(currentVolume)}주) - 매도 신호';
+          } else if (priceChangePercent < 0) {
+            return '거래량 ${_formatNumber(currentVolume)}주로 가격 하락 동반 - 매도 신호';
+          } else {
+            return '거래량 ${_formatNumber(currentVolume)}주로 하락 추세 - 매도 고려';
+          }
+        } else {
+          return '거래량 ${_formatNumber(currentVolume)}주 (평균의 ${volumeRatio.toStringAsFixed(1)}배) - 관망';
+        }
+        
+      case 'vwap':
+        final vwapValue = (technicalData['vwap'] as num?)?.toDouble();
+        
+        if (vwapValue == null) {
+          return '거래량 가중 평균가격 데이터 부족 - 관망 권장';
+        }
+        
+        final vwapDiff = ((currentPrice - vwapValue) / vwapValue) * 100;
+        
+        if (signal == '매수') {
+          if (vwapDiff < -2.0) {
+            return '현재가 \$${_formatNumber(currentPrice)}이 평균가격 \$${_formatNumber(vwapValue)}보다 ${vwapDiff.abs().toStringAsFixed(1)}% 낮음 - 저점 매수 기회';
+          } else if (vwapDiff < 0) {
+            return '현재가 \$${_formatNumber(currentPrice)}이 평균가격 \$${_formatNumber(vwapValue)}보다 ${vwapDiff.abs().toStringAsFixed(1)}% 낮음 - 반등 기대';
+          } else {
+            return '현재가 \$${_formatNumber(currentPrice)}이 평균가격 \$${_formatNumber(vwapValue)}보다 ${vwapDiff.toStringAsFixed(1)}% 높음 - 상승 추세';
+          }
+        } else if (signal == '매도') {
+          if (vwapDiff > 2.0) {
+            return '현재가 \$${_formatNumber(currentPrice)}이 평균가격 \$${_formatNumber(vwapValue)}보다 ${vwapDiff.toStringAsFixed(1)}% 높음 - 고점 매도 기회';
+          } else if (vwapDiff > 0) {
+            return '현재가 \$${_formatNumber(currentPrice)}이 평균가격 \$${_formatNumber(vwapValue)}보다 ${vwapDiff.toStringAsFixed(1)}% 높음 - 하락 예상';
+          } else {
+            return '현재가 \$${_formatNumber(currentPrice)}이 평균가격 \$${_formatNumber(vwapValue)}보다 ${vwapDiff.abs().toStringAsFixed(1)}% 낮음 - 하락 추세';
+          }
+        } else {
+          return '현재가 \$${_formatNumber(currentPrice)}이 평균가격 \$${_formatNumber(vwapValue)}과 비슷 (${vwapDiff.abs().toStringAsFixed(1)}% 차이) - 관망';
+        }
+        
+      case 'adx':
+        final adxValue = (technicalData['adx'] as num?)?.toDouble();
+        
+        if (adxValue == null) {
+          return '추세 강도 데이터 부족 - 관망 권장';
+        }
+        
+        if (signal == '매수') {
+          if (adxValue >= 25) {
+            return '추세 강도 ${adxValue.toStringAsFixed(1)} (강한 상승 추세) - 매수 기회';
+          } else if (adxValue >= 20) {
+            return '추세 강도 ${adxValue.toStringAsFixed(1)} (상승 추세 형성) - 매수 고려';
+          } else {
+            return '추세 강도 ${adxValue.toStringAsFixed(1)} (약한 상승 추세) - 매수 고려';
+          }
+        } else if (signal == '매도') {
+          if (adxValue >= 25) {
+            return '추세 강도 ${adxValue.toStringAsFixed(1)} (강한 하락 추세) - 매도 권장';
+          } else if (adxValue >= 20) {
+            return '추세 강도 ${adxValue.toStringAsFixed(1)} (하락 추세 형성) - 매도 고려';
+          } else {
+            return '추세 강도 ${adxValue.toStringAsFixed(1)} (약한 하락 추세) - 매도 고려';
+          }
+        } else {
+          return '추세 강도 ${adxValue.toStringAsFixed(1)} (중립) - 관망';
+        }
+        
+      default:
+        if (signal == '매수') {
+          return '${indicatorName} 상승 신호로 매수';
+        } else if (signal == '매도') {
+          return '${indicatorName} 하락 신호로 매도';
+        } else {
+          return '${indicatorName} 중립 구간으로 관망';
+        }
+    }
+  }
+
+  Widget _buildAnalysisItem(String label, String value, Color color, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              color: color,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 투자 스타일 정보 표시
+  Widget _buildInvestmentStyleInfo(Map<String, dynamic> analysis) {
+    final styleName = analysis['investmentStyle'] ?? _getStyleName(_currentStyle);
+    final styleColor = _getStyleColor(_currentStyle);
+    
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: styleColor.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: styleColor.withOpacity(0.3)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            _getStyleIcon(_currentStyle),
+            color: styleColor,
+            size: 14,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            styleName,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: styleColor,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 기술적 지표 조건 표시 (2열 배치, 매수/매도 색상 구분)
+  Future<Widget> _buildTechnicalIndicatorsSection(Map<String, dynamic> analysis) async {
+    final signals = analysis['signals'] as List<dynamic>? ?? [];
+    final metConditions = analysis['metConditions'] ?? 0;
+    final totalConditions = analysis['totalConditions'] ?? 7; // 7개 핵심 지표로 통일
+    
+    // 통합 데이터 관리자에서 분석 데이터 확인
+    double aggregateScore = 0.0;
+    String signal = '관망';
+    double confidence = 0.0;
+    Map<String, dynamic> individualScores = {};
+    
+    // 기존 분석 결과에서 확인
+    aggregateScore = (analysis['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
+    signal = analysis['signal'] as String? ?? '관망';
+    confidence = (analysis['confidence'] as num?)?.toDouble() ?? 0.0;
+    individualScores = analysis['individualScores'] as Map<String, dynamic>? ?? {};
+    
+    aggregateScore = aggregateScore.clamp(-1.0, 1.0); // 안전장치로 한번 더 제한
+    
+    print('📊 UI 지표종합점수: 통합 데이터 사용 = ${aggregateScore.toStringAsFixed(3)}');
+    print('📊 통합 분석 결과 상세:');
+    print('  - comprehensiveScore: $aggregateScore');
+    print('  - signal: $signal');
+    print('  - confidence: $confidence');
+    print('  - individualScores: $individualScores');
+    print('  - 최종 사용 점수: $aggregateScore');
+    
+    // 종합 임계값: 로컬 DB에서 실제 저장된 투자 스타일 설정값 사용
+    // 현재 사용자의 투자스타일을 가져와서 사용
+    final currentUserStyle = await _styleManager.getCurrentStyle();
+    final styleParams = await _styleManager.getStyleParameters(currentUserStyle);
+    final buyThreshold = (styleParams['buyThreshold'] as num?)?.toDouble();
+    final sellThreshold = (styleParams['sellThreshold'] as num?)?.toDouble();
+    
+    if (buyThreshold == null || sellThreshold == null) {
+      print('⚠️ 투자 스타일 임계값이 설정되지 않았습니다.');
+      return Container();
+    }
+    
+    print('📊 기술적 지표 조건 - 로컬 DB 설정값:');
+    print('   - 매수 임계값: $buyThreshold');
+    print('   - 매도 임계값: $sellThreshold');
+    print('   - 투자 스타일: ${currentUserStyle.name}');
+    print('   - 사용자 설정 스타일: $currentUserStyle');
+    
+    // 🔧 수정: 자동매매와 동일한 로직으로 매수/매도 판단
+    // 개별 지표 점수를 기반으로 매수/매도 시그널 분류
+    final buyIndicators = <String>[];
+    final sellIndicators = <String>[];
+    
+    // 개별 지표 점수에서 시그널 생성 (자동매매와 동일한 로직)
+    individualScores.forEach((indicatorName, score) {
+      final scoreValue = (score as num?)?.toDouble() ?? 0.0;
+      if (scoreValue > buyThreshold) {
+        buyIndicators.add(indicatorName);
+      } else if (scoreValue < sellThreshold) {
+        sellIndicators.add(indicatorName);
+      }
+    });
+    
+    // 🔧 수정: 자동매매와 동일한 최종 시그널 판단 로직
+    String finalSignal = '관망';
+    if (buyIndicators.length > sellIndicators.length) {
+      finalSignal = '매수';
+    } else if (sellIndicators.length > buyIndicators.length) {
+      finalSignal = '매도';
+    }
+    
+    print('📊 개별 지표 시그널 분석:');
+    print('  - 매수 지표: $buyIndicators');
+    print('  - 매도 지표: $sellIndicators');
+    print('  - 최종 시그널: $finalSignal (자동매매와 동일한 로직)');
+    
+    // 🔧 수정: 최종 시그널을 업데이트
+    signal = finalSignal;
+    
+    // 7개 핵심 지표 목록
+    final allIndicators = [
+      {'name': 'RSI', 'icon': '📊'},
+      {'name': 'MACD', 'icon': '📈'},
+      {'name': '볼린저밴드', 'icon': '📉'},
+      {'name': '이동평균선', 'icon': '📊'},
+      {'name': '거래량', 'icon': '📊'},
+      {'name': 'VWAP', 'icon': '📊'},
+      {'name': 'ADX', 'icon': '📊'},
+    ];
+    
+    // 개별 지표 점수를 기반으로 시그널 맵 생성 (한글명으로 매핑)
+    final signalMap = <String, Map<String, dynamic>>{};
+    individualScores.forEach((indicatorName, score) {
+      final scoreValue = (score as num?)?.toDouble() ?? 0.0;
+      final signal = scoreValue > buyThreshold ? '매수' : (scoreValue < sellThreshold ? '매도' : '관망');
+      final koreanName = _getKoreanIndicatorName(indicatorName);
+      signalMap[koreanName] = {
+        'name': koreanName,
+        'score': scoreValue,
+        'signal': signal,
+        'reason': _generateDetailedReason(indicatorName, scoreValue, signal, analysis),
+      };
+    });
+    
+    print('🔍 signalMap 디버깅:');
+    print('  - individualScores keys: ${individualScores.keys.toList()}');
+    print('  - signalMap keys: ${signalMap.keys.toList()}');
+    print('  - allIndicators names: ${allIndicators.map((i) => i['name']).toList()}');
+    
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.green[50],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.green[200]!),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '기술적 지표 조건',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+              color: Colors.green[700],
+            ),
+          ),
+          const SizedBox(height: 8),
+          // 지표 종합 점수 표시
+          Builder(builder: (_) {
+            final scoreText = aggregateScore >= 0 ? '+${aggregateScore.toStringAsFixed(3)}' : aggregateScore.toStringAsFixed(3);
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.assessment, size: 16, color: Colors.black54),
+                    const SizedBox(width: 6),
+                    Text(
+                      '지표 종합점수: $scoreText',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.black87),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Row(
+                  children: [
+                    const SizedBox(width: 22),
+                    Text('매수 임계값: ${buyThreshold.toStringAsFixed(2)}', style: const TextStyle(fontSize: 11, color: Colors.black54, fontWeight: FontWeight.w500)),
+                    const SizedBox(width: 12),
+                    Text('매도 임계값: ${sellThreshold.toStringAsFixed(2)}', style: const TextStyle(fontSize: 11, color: Colors.black54, fontWeight: FontWeight.w500)),
+                  ],
+                ),
+              ],
+            );
+          }),
+          const SizedBox(height: 12),
+          // 2열로 배치 (7개 핵심 지표)
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 왼쪽 열 (RSI, MACD, 볼린저밴드, 이동평균선)
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: allIndicators.take(4).map((indicator) {
+                    final signal = signalMap[indicator['name']];
+                    final hasSignal = signal != null;
+                    
+                    // 매수/매도 색상 결정 (양수: 빨간색, 음수: 파란색, 관망: 초록색)
+                    Color checkColor = Colors.grey;
+                    String checkSymbol = '○';
+                    if (hasSignal) {
+                      final score = (signal?['score'] as num?)?.toDouble() ?? 0.0;
+                      print('🔍 지표 체크표시 디버깅: ${indicator['name']} = $score');
+                      if (score > 0.05) {
+                        checkColor = Colors.red; // 양수값 - 빨간색
+                        checkSymbol = '✓';
+                      } else if (score < -0.05) {
+                        checkColor = Colors.blue; // 음수값 - 파란색
+                        checkSymbol = '✓';
+                      } else {
+                        checkColor = Colors.green; // 관망에 가까운값 - 초록색
+                        checkSymbol = '✓';
+                      }
+                    }
+                    
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 20,
+                            child: Text(
+                              checkSymbol,
+                              style: TextStyle(
+                                color: checkColor,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '${indicator['name'] ?? ''}${hasSignal ? ' (${_getIndicatorScore(indicator['name'] ?? '', analysis).toStringAsFixed(3)})' : ''}',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: hasSignal ? checkColor : Colors.grey[600],
+                                    fontWeight: hasSignal ? FontWeight.w500 : FontWeight.normal,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+              // 두 번째 열 (거래량, VWAP, ADX)
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: allIndicators.skip(4).map((indicator) {
+                    final signal = signalMap[indicator['name']];
+                    final hasSignal = signal != null;
+                    
+                    // 매수/매도 색상 결정 (양수: 빨간색, 음수: 파란색, 관망: 초록색)
+                    Color checkColor = Colors.grey;
+                    String checkSymbol = '○';
+                    if (hasSignal) {
+                      final score = (signal?['score'] as num?)?.toDouble() ?? 0.0;
+                      print('🔍 지표 체크표시 디버깅: ${indicator['name']} = $score');
+                      if (score > 0.05) {
+                        checkColor = Colors.red; // 양수값 - 빨간색
+                        checkSymbol = '✓';
+                      } else if (score < -0.05) {
+                        checkColor = Colors.blue; // 음수값 - 파란색
+                        checkSymbol = '✓';
+                      } else {
+                        checkColor = Colors.green; // 관망에 가까운값 - 초록색
+                        checkSymbol = '✓';
+                      }
+                    }
+                    
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 20,
+                            child: Text(
+                              checkSymbol,
+                              style: TextStyle(
+                                color: checkColor,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '${indicator['name'] ?? ''}${hasSignal ? ' (${_getIndicatorScore(indicator['name'] ?? '', analysis).toStringAsFixed(3)})' : ''}',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: hasSignal ? checkColor : Colors.grey[600],
+                                    fontWeight: hasSignal ? FontWeight.w500 : FontWeight.normal,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 지표 값 포맷팅 (통합)
+  String _formatIndicatorValue(dynamic value, String indicatorName) {
+    if (value == null) return 'N/A';
+    
+    // Map 형태인 경우 value 키에서 추출
+    if (value is Map<String, dynamic>) {
+      final extractedValue = value['value'] ?? value[indicatorName.toLowerCase()] ?? 0.0;
+      return _formatIndicatorValue(extractedValue, indicatorName);
+    }
+    
+    // 숫자 값인 경우 포맷팅
+    if (value is double || value is int) {
+      switch (indicatorName) {
+        case 'RSI':
+          final rsiValue = value.toStringAsFixed(1);
+          if (value < 30) {
+            return '${rsiValue} (과매도)';
+          } else if (value > 70) {
+            return '${rsiValue} (과매수)';
+          } else {
+            return '${rsiValue} (중립)';
+          }
+        case 'MACD':
+          return '${value.toStringAsFixed(2)}';
+        case '볼린저밴드':
+        case '이동평균선':
+        case 'VWAP':
+          return '${_formatNumber(value)}원';
+        case '거래량':
+          return '${_formatNumber(value)}배';
+        case 'ADX':
+          return '${value.toStringAsFixed(1)}';
+        case '모멘텀':
+          return '${value.toStringAsFixed(1)}';
+        default:
+          return value.toStringAsFixed(2);
+      }
+    }
+    
+    return 'N/A';
+  }
+
+
+
+  /// 거래 상태 오버레이
+  Widget _buildTradeStatusOverlay(String stockCode) {
+    final tradeStatus = _tradeStatusTracker.getTradeStatus(stockCode);
+    
+    if (tradeStatus == TradeStatus.none) {
+      return const SizedBox.shrink();
+    }
+    
+    return Positioned.fill(
+      child: Container(
+        decoration: BoxDecoration(
+          color: TradeStatusTracker.getStatusColor(tradeStatus),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Center(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.9),
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.1),
+                  blurRadius: 4,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  TradeStatusTracker.getStatusIcon(tradeStatus),
+                  size: 16,
+                  color: _getTradeStatusTextColor(tradeStatus),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  TradeStatusTracker.getStatusText(tradeStatus),
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: _getTradeStatusTextColor(tradeStatus),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 거래 상태 관리 액션 핸들러
+  Future<void> _handleTradeStatusAction(String action) async {
+    try {
+      switch (action) {
+        case 'sync':
+          await _tradeStatusTracker.syncTradeStatusesFromHistory();
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('거래 상태가 동기화되었습니다.'),
+                backgroundColor: Colors.green,
+                duration: Duration(seconds: 2),
+              ),
+            );
+          }
+          break;
+          
+        case 'rebuild':
+          await _tradeStatusTracker.rebuildTradeStatuses();
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('거래 상태가 재구성되었습니다.'),
+                backgroundColor: Colors.blue,
+                duration: Duration(seconds: 2),
+              ),
+            );
+          }
+          break;
+          
+        case 'detect':
+          await _tradeStatusTracker.autoDetectHoldings();
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('보유종목이 자동 감지되었습니다.'),
+                backgroundColor: Colors.orange,
+                duration: Duration(seconds: 2),
+              ),
+            );
+          }
+          break;
+          
+        case 'clear':
+          // 확인 다이얼로그 표시
+          final confirmed = await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('거래 상태 초기화'),
+              content: const Text('모든 거래 상태를 초기화하시겠습니까?\n이 작업은 되돌릴 수 없습니다.'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('취소'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  child: const Text('초기화'),
+                ),
+              ],
+            ),
+          );
+          
+          if (confirmed == true) {
+            await _tradeStatusTracker.clearAllTradeStatuses();
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('거래 상태가 초기화되었습니다.'),
+                  backgroundColor: Colors.red,
+                  duration: Duration(seconds: 2),
+                ),
+              );
+            }
+          }
+          break;
+      }
+    } catch (e) {
+      print('❌ 거래 상태 관리 액션 실패: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('오류가 발생했습니다: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    }
+  }
+
+  /// 거래 상태에 따른 텍스트 색상 반환
+  Color _getTradeStatusTextColor(TradeStatus status) {
+    switch (status) {
+      case TradeStatus.none:
+        return Colors.black;
+      case TradeStatus.bought:
+        return Colors.red[700]!;
+      case TradeStatus.sold:
+        return Colors.blue[700]!;
+      case TradeStatus.holding:
+        return Colors.green[700]!;
+      case TradeStatus.buyOrdered:
+        return Colors.orange[700]!;
+      case TradeStatus.sellOrdered:
+        return Colors.purple[700]!;
+    }
+  }
+
+  /// 분석 시간 정보 표시
+  Widget _buildAnalysisTimeInfo(Map<String, dynamic> analysis) {
+    final analysisTime = analysis['analysisTime'] ?? '';
+    final analysisPrice = analysis['analysisPrice'] ?? 0.0;
+    
+    if (analysisTime.isEmpty) return const SizedBox.shrink();
+    
+    final dateTime = DateTime.tryParse(analysisTime);
+    if (dateTime == null) return const SizedBox.shrink();
+    
+    // 나스닥 종목인지 확인 (분석 결과에서 종목코드 추출)
+    final stockCode = analysis['stockCode'] as String? ?? '';
+    final isNasdaq = _isNasdaqStock(stockCode);
+    
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.grey[100],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.grey[300]!),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.access_time, size: 16, color: Colors.grey),
+          const SizedBox(width: 8),
+          Text(
+            '분석: ${_formatDateTime(dateTime)}',
+            style: const TextStyle(
+              fontSize: 12,
+              color: Colors.black87,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const Spacer(),
+          Text(
+            isNasdaq ? '가격: \$${analysisPrice.toStringAsFixed(2)}' : '가격: ${Formatters.formatPrice(analysisPrice)}',
+            style: const TextStyle(
+              fontSize: 12,
+              color: Colors.black87,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNoApiMessage() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.grey[100],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.grey[300]!),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.info_outline, size: 16, color: Colors.grey[600]),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'API 설정을 완료하면 실시간 분석 결과를 확인할 수 있습니다.',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.grey[600],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatDateTime(DateTime dateTime) {
+    return '${dateTime.month.toString().padLeft(2, '0')}/${dateTime.day.toString().padLeft(2, '0')} '
+           '${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}';
+  }
+
+
+
+  /// 시그널 시간 정보 표시
+  Widget _buildSignalTimeInfo(String stockCode, Map<String, dynamic> analysis) {
+    final signal = analysis['signal'] as String? ?? '관망';
+    
+    // 매수/매도 시그널이 아닌 경우 표시하지 않음
+    if (signal != '매수' && signal != '매도') {
+      return const SizedBox.shrink();
+    }
+    
+    // 시그널 시간 가져오기
+    final signalTime = _signalTimestamps[stockCode];
+    if (signalTime == null) {
+      return const SizedBox.shrink();
+    }
+    
+    // 시그널 색상 결정
+    final signalColor = signal == '매수' ? Colors.green : Colors.red;
+    final signalIcon = signal == '매수' ? Icons.trending_up : Icons.trending_down;
+    
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: signalColor.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: signalColor.withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          Icon(signalIcon, size: 16, color: signalColor),
+          const SizedBox(width: 8),
+          Text(
+            '$signal 시그널: ${_formatDateTime(signalTime)}',
+            style: TextStyle(
+              fontSize: 12,
+              color: signalColor,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const Spacer(),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: signalColor,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              '고정',
+              style: const TextStyle(
+                fontSize: 10,
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 정규장 시간 체크
+  bool _isTradingTime(String stockCode) {
+    return MarketTimeValidator.instance.isTradingTimeForSymbol(stockCode);
+  }
+
+  /// 정규장 시간 오버레이 (지표는 표시하되 매매 시그널만 제한)
+  Widget _buildTradingTimeOverlay(String stockCode) {
+    if (_isTradingTime(stockCode)) {
+      return const SizedBox.shrink();
+    }
+    
+    return Positioned.fill(
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.grey.withOpacity(0.3),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Center(
+          child: Card(
+            elevation: 4,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+              decoration: BoxDecoration(
+                color: Colors.orange.withOpacity(0.9),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.schedule,
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '정규장 시간 외',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 데이터 테이블 탭
+  Widget _buildDataTableTab() {
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    
+    return SingleChildScrollView(
+      controller: _analysisScrollController,
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 투자 스타일 정보
+          _buildInvestmentStyleInfoCard(),
+          const SizedBox(height: 16),
+          
+          // 분석 프로세스 흐름도
+          _buildAnalysisFlowDiagram(),
+          const SizedBox(height: 24),
+          
+          // 관심종목 데이터 테이블
+          _buildWatchlistDataTable(),
+          const SizedBox(height: 24),
+          
+          // 보유종목 데이터 테이블
+          _buildHoldingsDataTable(),
+          const SizedBox(height: 24),
+          
+          // 기술적 지표 계산 공식
+          _buildTechnicalIndicatorsFormulas(),
+          const SizedBox(height: 24),
+          
+          // 투자스타일별 상세 조건
+          _buildInvestmentStyleConditions(),
+        ],
+      ),
+    );
+  }
+
+  /// 분석 프로세스 흐름도
+  Widget _buildAnalysisFlowDiagram() {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.account_tree, color: Colors.indigo, size: 20),
+                const SizedBox(width: 8),
+                Text(
+                  '분석 프로세스 흐름도',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.indigo,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            
+            // 시각적 흐름도
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.grey[50],
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey[300]!),
+              ),
+              child: Column(
+                children: [
+                  // 1단계: 데이터 수집
+                  _buildFlowStepWithArrow(
+                    '1. 데이터 수집',
+                    'KIS API에서 일봉 데이터 조회\n• 종가, 고가, 저가, 거래량\n• 최소 14일 이상의 데이터',
+                    Icons.cloud_download,
+                    Colors.blue,
+                    hasArrow: true,
+                  ),
+                  
+                  // 2단계: 기술적 지표 계산
+                  _buildFlowStepWithArrow(
+                    '2. 기술적 지표 계산',
+                    'RSI, MACD, 볼린저밴드, 이동평균\n• 각 지표별 표준 공식 적용\n• 투자스타일별 임계값 설정',
+                    Icons.functions,
+                    Colors.green,
+                    hasArrow: true,
+                  ),
+                  
+                  // 3단계: 투자스타일 적용
+                  _buildFlowStepWithArrow(
+                    '3. 투자스타일 적용',
+                    '${_getStyleName(_styleManager.currentStyle)}\n• RSI 매수/매도 기준 적용\n• 신뢰도 및 목표가 계산',
+                    _getStyleIcon(_styleManager.currentStyle),
+                    _getStyleColor(_styleManager.currentStyle),
+                    hasArrow: true,
+                  ),
+                  
+                  // 4단계: 시그널 생성
+                  _buildFlowStepWithArrow(
+                    '4. 시그널 생성',
+                    '매수/매도/관망 판단\n• 조건 만족 개수 확인\n• 최종 신뢰도 계산',
+                    Icons.trending_up,
+                    Colors.orange,
+                    hasArrow: true,
+                  ),
+                  
+                  // 5단계: 결과 표시
+                  _buildFlowStepWithArrow(
+                    '5. 결과 표시',
+                    'UI에 분석 결과 표시\n• 실시간 업데이트 (30초)\n• 데이터 테이블 정리',
+                    Icons.table_chart,
+                    Colors.purple,
+                    hasArrow: false,
+                  ),
+                ],
+              ),
+            ),
+            
+            const SizedBox(height: 16),
+            
+            // 현재 상태 표시
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: _getStyleColor(_styleManager.currentStyle).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: _getStyleColor(_styleManager.currentStyle).withOpacity(0.3)),
+              ),
+              child: Row(
+                children: [
+                  Icon(_getStyleIcon(_styleManager.currentStyle), color: _getStyleColor(_styleManager.currentStyle), size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '현재 적용 중: ${_getStyleName(_styleManager.currentStyle)}',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: _getStyleColor(_styleManager.currentStyle),
+                          ),
+                        ),
+                        Text(
+                          _getStyleDescription(_styleManager.currentStyle),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: _getStyleColor(_styleManager.currentStyle).withOpacity(0.8),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 화살표가 있는 흐름도 단계 위젯
+  Widget _buildFlowStepWithArrow(String title, String description, IconData icon, Color color, {required bool hasArrow}) {
+    return Column(
+      children: [
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: color.withOpacity(0.3)),
+          ),
+          child: Row(
+            children: [
+              Icon(icon, color: color, size: 24),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: color,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      description,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        height: 1.3,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (hasArrow) ...[
+          const SizedBox(height: 8),
+          Icon(Icons.keyboard_arrow_down, color: Colors.grey, size: 24),
+          const SizedBox(height: 8),
+        ],
+      ],
+    );
+  }
+
+  /// 투자 스타일 정보 카드
+  Widget _buildInvestmentStyleInfoCard() {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(_getStyleIcon(_styleManager.currentStyle), color: _getStyleColor(_styleManager.currentStyle), size: 24),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '현재 투자스타일 - ${_getStyleName(_styleManager.currentStyle)}',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: _getStyleColor(_styleManager.currentStyle),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              _getStyleDescription(_styleManager.currentStyle),
+              style: const TextStyle(fontSize: 14, color: Colors.grey),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 투자 스타일 설명
+  String _getStyleDescription(InvestmentStyle style) {
+    switch (style) {
+      case InvestmentStyle.conservative:
+        return '안전한 투자로 리스크를 최소화하는 전략. RSI 30 이하에서 매수, 70 이상에서 매도.';
+      case InvestmentStyle.moderate:
+        return '균형잡힌 투자로 안정성과 수익성을 모두 고려하는 전략. RSI 35 이하에서 매수, 65 이상에서 매도.';
+      case InvestmentStyle.aggressive:
+        return '적극적인 투자로 높은 수익을 추구하는 전략. RSI 40 이하에서 매수, 60 이상에서 매도.';
+    }
+  }
+
+  /// 관심종목 데이터 테이블
+  Widget _buildWatchlistDataTable() {
+    if (_watchlistItems.isEmpty) {
+      return const Card(
+        child: Padding(
+          padding: EdgeInsets.all(16),
+          child: Text('관심종목이 없습니다.', style: TextStyle(fontSize: 16)),
+        ),
+      );
+    }
+
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.favorite, color: Colors.red, size: 20),
+                const SizedBox(width: 8),
+                Text(
+                  '관심종목 데이터 테이블',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.red,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: DataTable(
+                columnSpacing: 20,
+                columns: const [
+                  DataColumn(label: Text('종목명', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('종목코드', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('현재가', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('전일가', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('RSI', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('MACD', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('볼린저(중간)', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('SMA20', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('거래량(배)', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('VWAP', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('ADX', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('시그널', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('신뢰도', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('목표가', style: TextStyle(fontWeight: FontWeight.bold))),
+                ],
+                rows: _watchlistItems.map((item) {
+                  final stockCode = item['stock_code'] as String? ?? '';
+                  final analysis = _analysisResults[stockCode];
+                  final technicalRaw = analysis?['technicalData'];
+                  final technical = technicalRaw is Map ? technicalRaw : <String, dynamic>{};
+                  final indicators = <String, dynamic>{
+                    'rsi': technical['rsi'],
+                    'macd': technical['macd'],
+                    'bollinger': technical['bbMiddle'],
+                    'sma20': technical['ma20'],
+                    'volume': (() {
+                      final cv = (technical['currentVolume'] ?? 0).toDouble();
+                      final av = (technical['avgVolume'] ?? 1).toDouble();
+                      if (av == 0) return 0.0;
+                      return cv / av;
+                    })(),
+                    'vwap': technical['vwap'],
+                    'adx': technical['adx'],
+                  };
+                  
+                  // 나스닥 종목인지 확인
+                  final isNasdaq = _isNasdaqStock(stockCode);
+                  
+                                     return DataRow(
+                     cells: [
+                       DataCell(Text(_getDisplayName(item))),
+                       DataCell(Text(stockCode)),
+                       DataCell(Text(_formatPriceWithChange(analysis?['currentPrice'] ?? 0.0, (technical['previousPrice'] ?? 0.0).toDouble(), isNasdaq))),
+                       DataCell(Text(_formatPriceForDisplay((technical['previousPrice'] ?? 0.0).toDouble(), isNasdaq))),
+                       DataCell(Text('${_formatIndicatorValue(indicators['rsi'], 'RSI')}')),
+                       DataCell(Text('${_formatIndicatorValue(indicators['macd'], 'MACD')}')),
+                       DataCell(Text('${_formatIndicatorValue(indicators['bollinger'], '볼린저밴드')}')),
+                       DataCell(Text('${_formatIndicatorValue(indicators['sma20'], '이동평균선')}')),
+                       DataCell(Text('${_formatIndicatorValue(indicators['volume'], '거래량')}')),
+                       DataCell(Text('${_formatIndicatorValue(indicators['vwap'], 'VWAP')}')),
+                       DataCell(Text('${_formatIndicatorValue(indicators['adx'], 'ADX')}')),
+                       DataCell(Text(analysis?['signal'] ?? '관망')),
+                       DataCell(Text('${((analysis?['confidence'] ?? 0.0) <= 1.0 ? (analysis?['confidence'] ?? 0.0) * 100 : (analysis?['confidence'] ?? 0.0)).toStringAsFixed(0)}%')),
+                       DataCell(Text(isNasdaq ? '\$${(analysis?['targetPrice'] ?? 0.0).toStringAsFixed(2)}' : Formatters.formatPrice(analysis?['targetPrice'] ?? 0.0))),
+                     ],
+                   );
+                }).toList(),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 보유종목 데이터 테이블
+  Widget _buildHoldingsDataTable() {
+    if (_holdingsItems.isEmpty) {
+      return const Card(
+        child: Padding(
+          padding: EdgeInsets.all(16),
+          child: Text('보유종목이 없습니다.', style: TextStyle(fontSize: 16)),
+        ),
+      );
+    }
+
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.account_balance_wallet, color: Colors.blue, size: 20),
+                const SizedBox(width: 8),
+                Text(
+                  '보유종목 데이터 테이블',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.blue,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: DataTable(
+                columnSpacing: 20,
+                columns: const [
+                  DataColumn(label: Text('종목명', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('종목코드', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('현재가(등락률)', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('평균단가', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('보유수량', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('손익', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('손익률', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('RSI', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('MACD', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('볼린저(중간)', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('SMA20', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('거래량(배)', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('VWAP', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('ADX', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('시그널', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('신뢰도', style: TextStyle(fontWeight: FontWeight.bold))),
+                  DataColumn(label: Text('목표가', style: TextStyle(fontWeight: FontWeight.bold))),
+                ],
+                rows: _holdingsItems.map((item) {
+                  final stockCode = item['stockCode'] as String? ?? '';
+                  final analysis = _analysisResults[stockCode];
+                  final technicalRaw = analysis?['technicalData'];
+                  final technical = technicalRaw is Map ? technicalRaw : <String, dynamic>{};
+                  final indicators = <String, dynamic>{
+                    'rsi': technical['rsi'],
+                    'macd': technical['macd'],
+                    'bollinger': technical['bbMiddle'],
+                    'sma20': technical['ma20'],
+                    'volume': (() {
+                      final cv = (technical['currentVolume'] ?? 0).toDouble();
+                      final av = (technical['avgVolume'] ?? 1).toDouble();
+                      if (av == 0) return 0.0;
+                      return cv / av;
+                    })(),
+                    'vwap': technical['vwap'],
+                    'adx': technical['adx'],
+                  };
+                  final signals = analysis?['signals'] as List<dynamic>? ?? [];
+                  final profit = (item['profit'] ?? 0.0).toDouble();
+                  final profitRate = (item['profitRate'] ?? 0.0).toDouble();
+                  
+                  // 나스닥 종목인지 확인
+                  final isNasdaq = _isNasdaqStock(stockCode);
+                  
+                                     return DataRow(
+                     cells: [
+                       DataCell(Text(_getDisplayName(item))),
+                       DataCell(Text(stockCode)),
+                       DataCell(Text(_formatPriceWithChange(analysis?['currentPrice'] ?? 0.0, (technical['previousPrice'] ?? 0.0).toDouble(), isNasdaq))),
+                       DataCell(Text(_formatPriceForDisplay((technical['previousPrice'] ?? 0.0).toDouble(), isNasdaq))),
+                       DataCell(Text('${item['quantity'] ?? 0}')),
+                       DataCell(Text(
+                         _formatPriceForDisplay(profit, isNasdaq, showSign: true),
+                         style: TextStyle(color: profit >= 0 ? Colors.red : Colors.blue),
+                       )),
+                       DataCell(Text(
+                         '${profitRate >= 0 ? '+' : ''}${profitRate.toStringAsFixed(2)}%',
+                         style: TextStyle(color: profitRate >= 0 ? Colors.red : Colors.blue),
+                       )),
+                       DataCell(Text('${_formatIndicatorValue(indicators['rsi'], 'RSI')}')),
+                       DataCell(Text('${_formatIndicatorValue(indicators['macd'], 'MACD')}')),
+                       DataCell(Text('${_formatIndicatorValue(indicators['bollinger'], '볼린저밴드')}')),
+                       DataCell(Text('${_formatIndicatorValue(indicators['sma20'], '이동평균선')}')),
+                       DataCell(Text('${_formatIndicatorValue(indicators['volume'], '거래량')}')),
+                       DataCell(Text('${_formatIndicatorValue(indicators['vwap'], 'VWAP')}')),
+                       DataCell(Text('${_formatIndicatorValue(indicators['adx'], 'ADX')}')),
+                       DataCell(Text(analysis?['signal'] ?? '관망')),
+                       DataCell(Text('${((analysis?['confidence'] ?? 0.0) <= 1.0 ? (analysis?['confidence'] ?? 0.0) * 100 : (analysis?['confidence'] ?? 0.0)).toStringAsFixed(0)}%')),
+                       DataCell(Text(_formatPriceForDisplay(analysis?['targetPrice'] ?? 0.0, isNasdaq))),
+                     ],
+                   );
+                }).toList(),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 기술적 지표 계산 공식
+  Widget _buildTechnicalIndicatorsFormulas() {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.functions, color: Colors.green, size: 20),
+                const SizedBox(width: 8),
+                Text(
+                  '기술적 지표 계산 공식',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.green,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _buildIndicatorFormula(
+              'RSI (Relative Strength Index)',
+              'RSI = 100 - (100 / (1 + RS))\nRS = 평균 상승폭 / 평균 하락폭\n• Wilder\'s smoothing 사용\n• 기간: 14일\n• 과매도: 30 이하, 과매수: 70 이상',
+              Colors.orange,
+            ),
+            const SizedBox(height: 12),
+            _buildIndicatorFormula(
+              'MACD (Moving Average Convergence Divergence)',
+              'MACD = EMA(12) - EMA(26)\nSignal = EMA(MACD, 9)\nHistogram = MACD - Signal\n• 매수: MACD > Signal\n• 매도: MACD < Signal',
+              Colors.blue,
+            ),
+            const SizedBox(height: 12),
+            _buildIndicatorFormula(
+              '볼린저 밴드 (Bollinger Bands)',
+              '중간선 = SMA(20)\n상단선 = 중간선 + (2 × 표준편차)\n하단선 = 중간선 - (2 × 표준편차)\n• 기간: 20일, 표준편차: 2',
+              Colors.purple,
+            ),
+            const SizedBox(height: 12),
+            _buildIndicatorFormula(
+              '이동평균 (Simple Moving Average)',
+              'SMA = (P1 + P2 + ... + Pn) / n\n• 단순이동평균 사용\n• 기간: 20일',
+              Colors.green,
+            ),
+            const SizedBox(height: 12),
+            _buildIndicatorFormula(
+              '거래량 지표 (시간대별 동적 임계값)',
+              '거래량 비율 = 현재 거래량 / 20일 평균 거래량\n• KOSPI/KOSDAQ: 09:00-15:30\n• NASDAQ: 22:30-05:00\n• 시간대별 동적 임계값 적용\n• 거래 시간 외: 0% 신뢰도',
+              Colors.red,
+            ),
+            const SizedBox(height: 12),
+            _buildIndicatorFormula(
+              'VWAP (Volume Weighted Average Price)',
+              'VWAP = Σ(가격 × 거래량) / Σ(거래량)\n• 거래량 가중 평균가격\n• 현재가 대비 위치로 매매 신호 판단\n• 상단 돌파: 매도 신호\n• 하단 터치: 매수 신호',
+              Colors.teal,
+            ),
+            const SizedBox(height: 12),
+            _buildIndicatorFormula(
+              'ADX (Average Directional Index)',
+              'ADX = 평균 방향성 지수\n• 추세 강도 측정\n• ADX ≥ 25: 강한 추세\n• ADX < 25: 약한 추세\n• 추세 방향에 따른 매매 신호',
+              Colors.indigo,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 지표 공식 위젯
+  Widget _buildIndicatorFormula(String title, String formula, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            formula,
+            style: const TextStyle(
+              fontSize: 14,
+              fontFamily: 'monospace',
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 투자스타일별 상세 조건
+  Widget _buildInvestmentStyleConditions() {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.settings, color: Colors.amber, size: 20),
+                const SizedBox(width: 8),
+                Text(
+                  '투자스타일별 상세 조건',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.amber,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _buildStyleConditionCard(
+              InvestmentStyle.conservative,
+              '안정적 투자',
+              '리스크를 최소화하는 보수적 전략',
+              Colors.green,
+              {
+                'RSI 매수': '30 이하',
+                'RSI 매도': '70 이상',
+                'MACD 매수': 'MACD > Signal',
+                'MACD 매도': 'MACD < Signal',
+                '볼린저밴드 매수': '하단선 근처',
+                '볼린저밴드 매도': '상단선 근처',
+                '거래량 조건': '1.2배 이상',
+                '모멘텀 조건': '양수',
+                '신뢰도 기준': '70% 이상',
+              },
+            ),
+            const SizedBox(height: 12),
+            _buildStyleConditionCard(
+              InvestmentStyle.moderate,
+              '일반적 투자',
+              '안정성과 수익성을 균형있게 고려',
+              const Color(0xFF3B5BA9),
+              {
+                'RSI 매수': '35 이하',
+                'RSI 매도': '65 이상',
+                'MACD 매수': 'MACD > Signal',
+                'MACD 매도': 'MACD < Signal',
+                '볼린저밴드 매수': '하단선 근처',
+                '볼린저밴드 매도': '상단선 근처',
+                '거래량 조건': '1.0배 이상',
+                '모멘텀 조건': '양수',
+                '신뢰도 기준': '60% 이상',
+              },
+            ),
+            const SizedBox(height: 12),
+            _buildStyleConditionCard(
+              InvestmentStyle.aggressive,
+              '공격적 투자',
+              '높은 수익을 추구하는 적극적 전략',
+              Colors.red,
+              {
+                'RSI 매수': '40 이하',
+                'RSI 매도': '60 이상',
+                'MACD 매수': 'MACD > Signal',
+                'MACD 매도': 'MACD < Signal',
+                '볼린저밴드 매수': '중간선 근처',
+                '볼린저밴드 매도': '상단선 근처',
+                '거래량 조건': '0.8배 이상',
+                '모멘텀 조건': '양수 또는 음수',
+                '신뢰도 기준': '50% 이상',
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 스타일별 조건 카드
+  Widget _buildStyleConditionCard(
+    InvestmentStyle style,
+    String title,
+    String description,
+    Color color,
+    Map<String, String> conditions,
+  ) {
+    final isCurrentStyle = style == _styleManager.currentStyle;
+    
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: isCurrentStyle ? color.withOpacity(0.2) : color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: isCurrentStyle ? color : color.withOpacity(0.3),
+          width: isCurrentStyle ? 2 : 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(_getStyleIcon(style), color: color, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                title,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                ),
+              ),
+              if (isCurrentStyle) ...[
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: color,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Text(
+                    '현재',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            description,
+            style: TextStyle(
+              fontSize: 12,
+              color: Colors.grey[600],
+            ),
+          ),
+          const SizedBox(height: 8),
+          ...conditions.entries.map((entry) => Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Row(
+              children: [
+                Text(
+                  '• ${entry.key}:',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  entry.value,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: color,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          )),
+        ],
+      ),
+    );
+  }
+
+  /// MACD 값 포맷팅
+  String _formatMACDValue(dynamic macdValue) {
+    if (macdValue == null) return 'N/A';
+    
+    if (macdValue is Map<String, dynamic>) {
+      // MACD가 Map 형태인 경우 (macd, signal, histogram 포함)
+      final macd = macdValue['macd'] ?? 0.0;
+      return macd.toStringAsFixed(2);
+    } else if (macdValue is double || macdValue is int) {
+      // 단일 값인 경우
+      return macdValue.toStringAsFixed(2);
+    }
+    
+    return 'N/A';
+  }
+
+  /// 볼린저밴드 값 포맷팅
+  String _formatBollingerValue(dynamic bollingerValue) {
+    if (bollingerValue == null) return 'N/A';
+    
+    if (bollingerValue is Map<String, dynamic>) {
+      // 볼린저밴드가 Map 형태인 경우 (upper, middle, lower 포함)
+      final middle = bollingerValue['middle'] ?? 0.0;
+      return middle.toStringAsFixed(0);
+    } else if (bollingerValue is double || bollingerValue is int) {
+      // 단일 값인 경우
+      return bollingerValue.toStringAsFixed(0);
+    }
+    
+    return 'N/A';
+  }
+
+
+
+
+
+  /// 자동매매 분석 결과 구독 (예전 서비스 의존 제거)
+  void _subscribeToAutoTradingAnalysis() {
+    // TODO: AutoTradingCycle 또는 별도 분석 스트림과 연계 시 이곳에 연결
+    // 현재는 시그널/알림/DB 중심이므로, 화면 갱신은 DB observe 로 전환을 권장
+    // 분석 결과 스트림 구독 (임시 비활성 혹은 AppDataManager 연계)
+    /*
+    analysisStream.listen((analysisData) {
+      final stockCode = analysisData['stockCode'] as String?;
+      final stockName = analysisData['stockName'] as String?;
+      final type = analysisData['type'] as String?;
+      final analysis = analysisData['analysis'] as Map<String, dynamic>?;
+      final timestamp = analysisData['timestamp'] as String?;
+      
+      if (stockCode != null && analysis != null) {
+        final stockName = AppDataManager.instance.getStockName(stockCode);
+        print('📡 자동매매 분석 결과 수신: $stockCode ($stockName) - ${analysis['signal']}');
+        
+        setState(() {
+          _analysisResults[stockCode] = analysis;
+        });
+        
+        // 시그널 변화 추적 및 알림
+        final signal = analysis['signal'] as String? ?? '관망';
+        SignalTracker().updateSignal(stockCode, stockName, signal);
+        
+        // 시그널이 발생한 경우 로그
+        if (signal == '매수' || signal == '매도') {
+          final time = timestamp != null ? DateTime.parse(timestamp) : DateTime.now();
+          print('🎯 시그널 발생: $stockCode - $signal (${time.hour}:${time.minute.toString().padLeft(2, '0')})');
+        }
+      }
+    });
+    */
+    
+    // 시그널 스트림 구독 (예전 경로 제거)
+    /*
+    signalStream.listen((signal) {
+      print('🚨 시그널 발생: ${signal.stockCode} - ${signal.type} (${signal.timestamp.hour}:${signal.timestamp.minute.toString().padLeft(2, '0')})');
+      
+      // mounted 체크 후 분석 결과에 시그널 정보 추가
+      if (mounted) {
+        setState(() {
+          if (_analysisResults.containsKey(signal.stockCode)) {
+            _analysisResults[signal.stockCode]!['lastSignal'] = {
+              'type': signal.type.toString(),
+              'timestamp': signal.timestamp.toIso8601String(),
+              'price': signal.price,
+              'reason': signal.reason,
+            };
+          }
+        });
+      }
+    });
+    */
+  }
+
+  String _formatSignalTime(String timestamp) {
+    final dateTime = DateTime.parse(timestamp);
+    return '${dateTime.month.toString().padLeft(2, '0')}/${dateTime.day.toString().padLeft(2, '0')} '
+           '${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}';
+  }
+
+  /// 자동 거래 실행
+  Future<void> _executeAutoTrade(String stockCode, String stockName, String signal, Map<String, dynamic>? priceData) async {
+    try {
+      print('🤖 자동거래 실행 시작: $stockCode ($stockName) - $signal');
+      print('📊 현재가 데이터: $priceData');
+      
+      double currentPrice = (priceData?['currentPrice'] ?? 0.0).toDouble();
+      if (currentPrice <= 0) {
+        // Fallback: KIS API에서 즉시 현재가 조회 (통일된 API 서비스 사용)
+        try {
+          final priceResp = await _unifiedApiService.getStockPrice(stockCode);
+          final fetched = (priceResp?['currentPrice'] ?? priceResp?['close'] ?? 0.0).toDouble();
+          if (fetched > 0) {
+            currentPrice = fetched;
+            print('✅ 현재가 보정 완료: $stockCode -> $currentPrice');
+          } else {
+            print('❌ 자동거래 실패: 현재가 조회 실패 - $stockCode');
+            return;
+          }
+        } catch (e) {
+          print('❌ 현재가 보정 실패 ($stockCode): $e');
+          return;
+        }
+      }
+      
+      print('💰 현재가: $currentPrice');
+
+      // 보유 수량 확인
+      final holdings = _holdingsItems.where((item) => 
+        (item['stock_code'] ?? item['stockCode']) == stockCode
+      ).toList();
+      
+      final hasHoldings = holdings.isNotEmpty && (holdings.first['quantity'] ?? 0) > 0;
+      
+      // 매도 시그널인데 보유하지 않은 경우: 실패 알림/히스토리 저장
+      if (signal == '매도' && !hasHoldings) {
+        print('ℹ️ 매도 시그널 실패: 보유하지 않은 종목 - $stockCode');
+        await LocalNotificationManager().showSellFailureNotification(
+          stockCode: stockCode,
+          stockName: stockName,
+          reason: '보유중이 아님 (자동매매 미실행)',
+          price: currentPrice,
+        );
+        final notificationRepository = NotificationHistoryRepository();
+        await notificationRepository.addNotification(
+          type: '매도 시도 실패',
+          stockCode: stockCode,
+          stockName: stockName,
+          message: '보유중이 아님 (자동매매 미실행)'
+        );
+        return;
+      }
+
+      // 매수 시그널인 경우 보유/잔고 확인
+      if (signal == '매수') {
+        // 이미 보유 중이면 분할 매수 전략 허용 (알림은 보내되 매수는 선택적)
+        if (hasHoldings) {
+          print('ℹ️ 매수 시그널 정보: 이미 보유 중인 종목 - $stockCode');
+          // 보유 중이어도 시그널은 생성 (분할 매수 전략)
+          // 실제 매수는 사용자가 결정하도록 알림만 표시
+        }
+        final isNasdaq = _isNasdaqStock(stockCode);
+        final requiredAmount = currentPrice * 1; // 1주 기준
+        
+        if (isNasdaq) {
+          // 나스닥 종목인 경우 달러 잔고 확인 (통일된 API 서비스 사용)
+          final availableDollar = await _unifiedApiService.getOverseasPaymentStandardBalanceCompat();
+          
+          if (availableDollar < requiredAmount) {
+            print('❌ 자동거래 실패: 달러 잔고 부족 - $stockCode (필요: \$${requiredAmount.toStringAsFixed(2)}, 보유: \$${availableDollar.toStringAsFixed(2)})');
+            
+            // 알림 발송
+            await LocalNotificationManager().showBuyFailureNotification(
+              stockCode: stockCode,
+              stockName: stockName,
+              reason: '달러 잔고 부족 (\$${requiredAmount.toStringAsFixed(2)} 필요)',
+              price: currentPrice,
+            );
+            
+            // 알림 히스토리에 저장
+            final notificationRepository = NotificationHistoryRepository();
+            await notificationRepository.addNotification(
+              type: '매수 주문 실패',
+              stockCode: stockCode,
+              stockName: stockName,
+              message: '달러 잔고 부족 (\$${requiredAmount.toStringAsFixed(2)} 필요)',
+            );
+            return;
+          }
+        } else {
+          // 국내 종목인 경우 원화 잔고 확인 (통일된 API 서비스 사용)
+          final balanceResp = await _unifiedApiService.getAccountBalanceCompat();
+          final accountInfo = balanceResp?['domestic']?['accountInfo'] as List?;
+          final availableBalance = accountInfo?.isNotEmpty == true 
+            ? (accountInfo!.first as Map<String, dynamic>)['ord_able_amt'] ?? 0.0
+            : 0.0;
+          
+          if (availableBalance < requiredAmount) {
+            print('❌ 자동거래 실패: 원화 잔고 부족 - $stockCode (필요: ${Formatters.formatPrice(requiredAmount)}, 보유: ${Formatters.formatPrice(availableBalance)})');
+            
+            // 알림 발송
+            await LocalNotificationManager().showBuyFailureNotification(
+              stockCode: stockCode,
+              stockName: stockName,
+              reason: '원화 잔고 부족 (${Formatters.formatPrice(requiredAmount)} 필요)',
+              price: currentPrice,
+            );
+            
+            // 알림 히스토리에 저장
+            final notificationRepository = NotificationHistoryRepository();
+            await notificationRepository.addNotification(
+              type: '매수 주문 실패',
+              stockCode: stockCode,
+              stockName: stockName,
+              message: '원화 잔고 부족 (${Formatters.formatPrice(requiredAmount)} 필요)',
+            );
+            return;
+          }
+        }
+      }
+
+      // 자동거래는 AutoTradingCycle(OrderProcessor) 경로 사용 권장
+      // 화면에서 직접 주문 실행은 지양 (DB/사이드이펙트 동기화 보장 위해)
+      // TODO: 필요 시 OrderProcessor를 직접 호출하는 유즈케이스로 치환
+      final result = {'success': false, 'message': 'UI 직접 주문 비활성'};
+
+      if (result['success'] == true) {
+        print('✅ 자동거래 성공: $stockCode $signal - ${result['message']}');
+        
+        // 거래 성공 후 데이터 갱신
+        await AppDataManager.instance.refreshData();
+        
+        // UI 갱신을 위한 플래그 설정
+        if (mounted) {
+          setState(() {
+            _needsRefresh = true;
+          });
+        }
+      } else {
+        print('❌ 자동거래 실패: $stockCode $signal - ${result['message']}');
+      }
+      
+    } catch (e) {
+      print('❌ 자동거래 실행 중 오류: $e');
+    }
+  }
+
+
+
+  /// 모든 분석 결과 새로고침 (자동 새로고침용 - 화면 새로 호출 없음)
+  Future<void> _refreshAllAnalysis() async {
+    print('🔄 모든 분석 결과 새로고침 시작 (자동)');
+    
+    try {
+      // 로딩 상태를 true로 설정하지 않고 백그라운드에서 분석 수행
+      await _performRealTimeAnalysis();
+      
+      // 분석 완료 후 UI 업데이트 (화면 새로 호출 없이)
+      if (mounted) {
+        setState(() {
+          // 필터링된 결과만 업데이트
+        });
+      }
+      
+      print('✅ 모든 분석 결과 새로고침 완료 (자동)');
+    } catch (e) {
+      print('❌ 모든 분석 결과 새로고침 실패: $e');
+    }
+  }
+
+  /// 모든 분석 결과 새로고침 (수동 새로고침용 - 화면 새로 호출)
+  Future<void> _refreshAllAnalysisWithLoading() async {
+    print('🔄 모든 분석 결과 새로고침 시작 (수동)');
+    
+    try {
+      // 로딩 상태 설정
+      if (mounted) {
+        setState(() {
+          _isLoading = true;
+        });
+      }
+      
+      // 전체 데이터 새로고침
+      await _performRealTimeAnalysis();
+      
+      // 분석 완료 후 UI 업데이트
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+      
+      print('✅ 모든 분석 결과 새로고침 완료 (수동)');
+    } catch (e) {
+      print('❌ 모든 분석 결과 새로고침 실패: $e');
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  /// 관심종목 변경 감지 시작
+  void _startWatchlistChangeDetection() {
+    Timer.periodic(const Duration(seconds: 5), (timer) async {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      
+      try {
+        // 현재 관심종목 목록 가져오기
+        final watchlistRepository = AppDataManager.instance.watchlistRepository;
+        final currentWatchlist = await watchlistRepository.getWatchlistWithStockInfo();
+        
+        // 기존 목록과 비교
+        if (_watchlistItems.length != currentWatchlist.length) {
+          print('🔄 관심종목 변경 감지: ${_watchlistItems.length} → ${currentWatchlist.length}');
+          
+          // 나스닥 종목 확인
+          final nasdaqItems = currentWatchlist.where((item) => 
+            (item['market'] as String? ?? '') == 'NASDAQ').toList();
+          print('🇺🇸 새 관심종목 중 나스닥 종목: ${nasdaqItems.length}개');
+          for (final item in nasdaqItems) {
+            print('  - ${item['stock_name']} (${item['stock_code']})');
+          }
+          
+          setState(() {
+            _watchlistItems = currentWatchlist;
+          });
+          
+          // 새로운 종목들 즉시 분석
+          await _analyzeNewWatchlistItems(currentWatchlist);
+        }
+      } catch (e) {
+        print('❌ 관심종목 변경 감지 실패: $e');
+      }
+    });
+  }
+
+  /// 새로운 관심종목들 즉시 분석
+  Future<void> _analyzeNewWatchlistItems(List<Map<String, dynamic>> newWatchlist) async {
+    try {
+      print('🔍 새로운 관심종목들 즉시 분석 시작...');
+      
+      for (final item in newWatchlist) {
+        final stockCode = item['stock_code'] as String? ?? '';
+        final stockName = item['stock_name'] as String? ?? stockCode;
+        
+        // 이미 분석된 종목은 건너뛰기
+        if (_analysisResults.containsKey(stockCode)) {
+          continue;
+        }
+        
+        print('📊 새로운 관심종목 즉시 분석: $stockCode ($stockName)');
+        
+        // 즉시 분석 수행
+        await _performAnalysisForStock({
+          'stockCode': stockCode,
+          'stockName': stockName,
+        });
+      }
+      
+      print('✅ 새로운 관심종목들 즉시 분석 완료');
+    } catch (e) {
+      print('❌ 새로운 관심종목들 즉시 분석 실패: $e');
+    }
+  }
+
+
+
+
+
+  String _buildSignalSummary(Map<String, dynamic> analysis) {
+    final signalsRaw = analysis['signals'];
+    List<Map<String, dynamic>> signals = [];
+    
+    if (signalsRaw != null) {
+      if (signalsRaw is List) {
+        signals = signalsRaw.map((item) {
+          if (item is Map<String, dynamic>) {
+            return item;
+          } else if (item is Map) {
+            return Map<String, dynamic>.from(item);
+          } else {
+            return <String, dynamic>{};
+          }
+        }).toList();
+      }
+    }
+    if (signals.isEmpty) return '시그널 없음';
+    
+    // 매수/매도 시그널 분리
+    final buySignals = signals.where((s) => s['type'] == '매수').toList();
+    final sellSignals = signals.where((s) => s['type'] == '매도').toList();
+    
+    final List<String> summaryParts = [];
+    
+    // 매수 시그널 요약
+    if (buySignals.isNotEmpty) {
+      final buyReasons = buySignals.map((s) => s['reason'] as String).toList();
+      summaryParts.add('${buySignals.length}개 매수 시그널: ${buyReasons.join(' + ')}');
+    }
+    
+    // 매도 시그널 요약
+    if (sellSignals.isNotEmpty) {
+      final sellReasons = sellSignals.map((s) => s['reason'] as String).toList();
+      summaryParts.add('${sellSignals.length}개 매도 시그널: ${sellReasons.join(' + ')}');
+    }
+    
+    return summaryParts.join(' + ');
+  }
+
+  /// 투자 스타일에 맞는 종목만 필터링 (임계값 기반)
+  Future<List<Map<String, dynamic>>> _filterItemsByStyle(List<Map<String, dynamic>> items) async {
+    if (items.isEmpty) return [];
+    
+    try {
+      // 스타일 파라미터를 미리 가져오기
+      final styleParams = await _styleManager.getStyleParameters(_currentStyle);
+      final buyThreshold = (styleParams['buyThreshold'] as num?)?.toDouble();
+    if (buyThreshold == null) {
+      print('⚠️ 매수 임계값이 설정되지 않았습니다.');
+      return items;
+    }
+      
+      return items.where((item) {
+        final stockCode = item['stock_code'] ?? item['stockCode'];
+        if (stockCode == null) return false;
+        
+        // 분석 결과 확인
+        final analysis = _analysisResults[stockCode];
+        if (analysis == null) return false;
+        
+        final aggregateScore = analysis['aggregateScore'] ?? 0.0;
+        
+        // 매수 조건 확인 (종합점수가 매수 임계값 이상)
+        final isSuitable = aggregateScore >= buyThreshold;
+        
+        if (isSuitable) {
+          print('✅ 필터링 통과 ($stockCode): 종합점수=${aggregateScore.toStringAsFixed(2)}, 매수임계값=${buyThreshold.toStringAsFixed(2)}');
+        }
+        
+        return isSuitable;
+      }).toList();
+    } catch (e) {
+      print('❌ 투자 스타일 필터링 실패: $e');
+      return items; // 오류 시 모든 종목 반환
+    }
+  }
+  
+  /// 필터링된 관심종목 반환
+  Future<List<Map<String, dynamic>>> get _filteredWatchlistItems async {
+    return await _filterItemsByStyle(_watchlistItems);
+  }
+  
+  /// 필터링된 보유종목 반환
+  Future<List<Map<String, dynamic>>> get _filteredHoldingsItems async {
+    return await _filterItemsByStyle(_holdingsItems);
+  }
+
+  /// 주식 분석 수행
+  Future<Map<String, dynamic>?> _analyzeStock(String stockCode) async {
+    try {
+      print('🔍 주식 분석 시작: $stockCode');
+      
+      // 1. 종목 정보에서 시장 확인
+      final stockInfo = AppDataManager.instance.getStockInfo(stockCode);
+      final market = stockInfo?['market'] ?? _detectMarket(stockCode);
+      print('📊 종목 시장: $market');
+      
+      // 2. 시장별 현재가 데이터 조회
+      Map<String, dynamic>? realtimeData;
+      double currentPrice = 0.0;
+      double prevClose = 0.0;
+      
+      try {
+        // 캐시에서 먼저 확인
+        realtimeData = _watchlistDataCache[stockCode];
+        if (realtimeData != null && realtimeData.isNotEmpty) {
+          currentPrice = (realtimeData['currentPrice'] ?? 0.0).toDouble();
+          prevClose = (realtimeData['prevClose'] ?? currentPrice).toDouble();
+          print('📊 캐시에서 데이터 조회 ($stockCode): 현재가=$currentPrice, 전일가=$prevClose');
+        }
+
+        // 캐시가 없거나 만료된 경우 실시간 데이터 조회 (통일된 API 서비스 사용)
+        if (currentPrice <= 0) {
+          realtimeData = await _unifiedApiService.getStockPrice(stockCode);
+          if (realtimeData != null && realtimeData.isNotEmpty) {
+            currentPrice = (realtimeData['currentPrice'] ?? 0.0).toDouble();
+            prevClose = (realtimeData['prevClose'] ?? currentPrice).toDouble();
+            
+            // 캐시에 저장
+            _watchlistDataCache[stockCode] = realtimeData;
+            print('📊 실시간 데이터 조회 ($stockCode): 현재가=$currentPrice, 전일가=$prevClose');
+          }
+        }
+      } catch (e) {
+        print('❌ 실시간 데이터 조회 실패 ($stockCode): $e');
+        return null;
+      }
+
+      if (currentPrice <= 0) {
+        print('⚠️ 유효하지 않은 현재가 ($stockCode): $currentPrice');
+        return null;
+      }
+
+      // 3. 시장별 차트 데이터 조회 (통일된 API 서비스 사용)
+      List<Map<String, dynamic>> rawKisData = [];
+      try {
+        rawKisData = await _unifiedApiService.getDailyChart(stockCode, count: 80);
+        print('📊 차트 데이터 조회 ($stockCode): ${rawKisData.length}개');
+        
+        if (rawKisData.isNotEmpty) {
+          print('📊 차트 데이터 샘플 ($stockCode):');
+          print('  - 키들: ${rawKisData.first.keys.toList()}');
+          print('  - 첫 번째 데이터: ${rawKisData.first}');
+        }
+      } catch (e) {
+        print('❌ 차트 데이터 조회 실패 ($stockCode): $e');
+        return null;
+      }
+
+      if (rawKisData.isEmpty) {
+        print('⚠️ 차트 데이터가 없습니다 ($stockCode)');
+        return null;
+      }
+
+      // 4. 투자스타일 파라미터 로드
+      // 현재 사용자의 투자스타일을 가져와서 사용
+      final currentUserStyle = await _styleManager.getCurrentStyle();
+      final styleParams = await _styleManager.getStyleParameters(currentUserStyle);
+      print('🔍 투자스타일 파라미터 로드 ($stockCode):');
+      print('  - 매수 임계값: ${styleParams['buyThreshold']}');
+      print('  - 매도 임계값: ${styleParams['sellThreshold']}');
+      print('  - RSI 조건: ${styleParams['rsiCondition']}');
+      print('  - 거래량 조건: ${styleParams['volumeCondition']}');
+      
+      // 5. 차트 데이터에서 현재가 정보 추출
+      final latestData = rawKisData.isNotEmpty ? rawKisData.last : {};
+      final chartCurrentPrice = (latestData['stck_prpr'] as num?)?.toDouble() ?? currentPrice;
+      final chartVolume = (latestData['acml_vol'] as num?)?.toDouble() ?? 0.0;
+      final chartHighPrice = (latestData['stck_hgpr'] as num?)?.toDouble() ?? currentPrice;
+      final chartLowPrice = (latestData['stck_lwpr'] as num?)?.toDouble() ?? currentPrice;
+      final chartOpenPrice = (latestData['stck_oprc'] as num?)?.toDouble() ?? currentPrice;
+      
+      print('📊 차트 데이터 추출 ($stockCode):');
+      print('  - 현재가: $chartCurrentPrice');
+      print('  - 거래량: $chartVolume');
+      print('  - 고가: $chartHighPrice');
+      print('  - 저가: $chartLowPrice');
+      print('  - 시가: $chartOpenPrice');
+      
+      // 6. AI 분석 서비스로 분석 수행
+      print('🤖 AI 분석 시작 ($stockCode) - 투자 스타일: ${_getStyleName(currentUserStyle)}');
+      final analysis = await _unifiedAnalysis.analyzeStock(
+        stockCode,
+        currentPrice: chartCurrentPrice,
+        prevClose: prevClose,
+        volume: chartVolume,
+        highPrice: chartHighPrice,
+        lowPrice: chartLowPrice,
+        openPrice: chartOpenPrice,
+        investmentStyle: _currentStyle,
+      );
+
+      // 5. 분석 결과 반환
+      if (analysis != null) {
+        final metConditions = analysis['metConditions'] ?? 0;
+        final totalConditions = analysis['totalConditions'] ?? 1;
+        final signals = analysis['signals'] ?? [];
+        
+        print('✅ 분석 완료 ($stockCode):');
+        print('  - 만족한 조건: $metConditions/$totalConditions');
+        print('  - 시그널 개수: ${signals.length}개');
+        print('  - RSI: ${analysis['indicators']?['rsi']?.toStringAsFixed(2) ?? 'N/A'}');
+        print('  - 거래량 조건: ${analysis['volumeCondition']?.toStringAsFixed(2) ?? 'N/A'}');
+        
+        final result = {
+          'currentPrice': currentPrice,
+          'prevClose': prevClose,
+          'market': market,
+          'indicators': analysis['indicators'] ?? {},
+          'signal': analysis['signal'] ?? '관망',
+          'confidence': analysis['confidence'] ?? 0,
+          'targetPrice': analysis['targetPrice'] ?? currentPrice,
+          'reason': analysis['reason'] ?? '분석 완료',
+          'signals': signals,
+          'metConditions': metConditions,
+          'totalConditions': totalConditions,
+          'volumeCondition': analysis['volumeCondition'],
+          'lastSignal': analysis['lastSignal'],
+          'analysisTime': DateTime.now().toIso8601String(),
+          'analysisPrice': currentPrice,
+          // 투자스타일 파라미터 추가 (로컬 DB에서 실제 저장된 값 사용)
+          'buyThreshold': (styleParams['buyThreshold'] as num?)?.toDouble() ?? 0.3,
+          'sellThreshold': (styleParams['sellThreshold'] as num?)?.toDouble() ?? -0.3,
+          'investmentStyle': currentUserStyle.toString(),
+        };
+        
+        return result;
+      } else {
+        print('❌ 분석 실패 ($stockCode): AI 분석 서비스에서 null 반환');
+        return null;
+      }
+    } catch (e) {
+      print('❌ 주식 분석 중 오류 발생 ($stockCode): $e');
+      return null;
+    }
+  }
+
+  /// 종목코드로 시장 감지
+  String _detectMarket(String stockCode) {
+    if (stockCode.startsWith('00') || stockCode.startsWith('01') || stockCode.startsWith('02')) {
+      return 'KOSPI';
+    } else if (stockCode.startsWith('03') || stockCode.startsWith('04') || stockCode.startsWith('05')) {
+      return 'KOSDAQ';
+    } else if (RegExp(r'^[A-Z]{1,6}$').hasMatch(stockCode)) {
+      return 'NASDAQ';
+    } else {
+      return 'UNKNOWN';
+    }
+  }
+
+  /// 지표별 점수 반환 (ComprehensiveIndicatorCalculator에서 계산된 값 사용)
+  double _getIndicatorScore(String indicatorName, Map<String, dynamic> analysis) {
+    // ComprehensiveIndicatorCalculator에서 계산된 contributions 사용 (가중치 적용된 기여도)
+    final contributions = analysis['contributions'] as Map<String, double>? ?? {};
+    final individualScores = analysis['individualScores'] as Map<String, double>? ?? {};
+    
+    // 지표명 매핑
+    final Map<String, String> indicatorMapping = {
+      'RSI': 'rsi',
+      'MACD': 'macd',
+      '볼린저밴드': 'bollinger',
+      '이동평균선': 'movingAverage',
+      '거래량': 'volume',
+      'VWAP': 'vwap',
+      'ADX': 'adx',
+    };
+    
+    final mappedName = indicatorMapping[indicatorName];
+    final contribution = contributions[mappedName] ?? 0.0;
+    final individualScore = individualScores[mappedName] ?? 0.0;
+    
+    print('🔍 지표기여도 디버깅:');
+    print('  - 지표명: $indicatorName');
+    print('  - 매핑된 키: $mappedName');
+    print('  - 개별 점수: ${individualScore.toStringAsFixed(3)}');
+    print('  - 기여도 (가중치 적용): ${contribution.toStringAsFixed(3)}');
+    print('  - 전체 contributions: $contributions');
+    
+    return contribution;
+  }
+
+  /// 매수/매도 기회 시그널 저장
+  Future<void> _saveOpportunitySignal(
+    String stockCode, 
+    String stockName, 
+    String signalType, 
+    Map<String, dynamic>? currentPriceData
+  ) async {
+    try {
+      final currentPrice = (currentPriceData?['currentPrice'] as num?)?.toDouble() ?? 0.0;
+      final signalRepo = AppDataManager.instance.signalHistoryRepository;
+      
+      // 시그널 히스토리에 저장
+      await signalRepo.saveSignal(
+        stockCode: stockCode,
+        signalType: signalType,
+        signalStrength: 0.8, // 기회 시그널 강도
+        price: currentPrice,
+        volume: 0.0,
+        confidence: 0.8,
+        memo: 'Opportunity_${_currentStyle.toString()}',
+      );
+      
+      // 알림 히스토리에 저장
+      final notificationRepo = AppDataManager.instance.notificationHistoryRepository;
+      await notificationRepo.saveNotification(
+        type: 'opportunity',
+        stockCode: stockCode,
+        stockName: stockName,
+        message: '$stockCode: $signalType 발견 (${currentPrice.toStringAsFixed(0)}원)',
+      );
+      
+      print('✅ 매수/매도 기회 시그널 저장 완료: $stockCode ($stockName) - $signalType');
+      
+    } catch (e) {
+      print('❌ 매수/매도 기회 시그널 저장 실패: $e');
+    }
+  }
+
+  /// 로딩 섹션
+  Widget _buildLoadingSection() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.blue[50],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.blue[200]!),
+      ),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.blue[600]!),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '데이터 수집 및 분석 중...',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.blue[700],
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '실시간 데이터를 수집하고 AI 분석을 수행하고 있습니다.',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.blue[600],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 지표명 한글화
+  String _getKoreanIndicatorName(String indicatorName) {
+    switch (indicatorName.toLowerCase()) {
+      case 'volume':
+        return '거래량';
+      case 'bollinger':
+      case 'bollingerbands':
+        return '볼린저밴드';
+      case 'movingaverage':
+      case 'moving_average':
+        return '이동평균선';
+      case 'rsi':
+        return 'RSI';
+      case 'macd':
+        return 'MACD';
+      case 'vwap':
+        return 'VWAP';
+      case 'adx':
+        return 'ADX';
+      default:
+        return indicatorName;
+    }
+  }
+
+  /// 지표명을 키로 변환
+  String _getIndicatorKey(String indicatorName) {
+    switch (indicatorName.toLowerCase()) {
+      case 'volume':
+        return 'volume';
+      case 'rsi':
+        return 'rsi';
+      case 'macd':
+        return 'macd';
+      case 'bollinger':
+      case 'bollingerbands':
+        return 'bollinger';
+      case 'movingaverage':
+      case 'moving_average':
+        return 'movingAverage';
+      case 'vwap':
+        return 'vwap';
+      case 'adx':
+        return 'adx';
+      default:
+        return indicatorName.toLowerCase();
+    }
+  }
+
+  /// 숫자에 쉼표 추가 (3자리마다)
+  String _formatNumber(dynamic value) {
+    if (value == null) return '0';
+    final numValue = value is num ? value : double.tryParse(value.toString()) ?? 0.0;
+    if (numValue == 0) return '0';
+    
+    // 정수인 경우
+    if (numValue == numValue.toInt()) {
+      return numValue.toInt().toString().replaceAllMapped(
+        RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'),
+        (Match match) => '${match[1]},'
+      );
+    }
+    
+    // 소수점이 있는 경우
+    final parts = numValue.toString().split('.');
+    final integerPart = int.tryParse(parts[0]) ?? 0;
+    final decimalPart = parts.length > 1 ? parts[1] : '';
+    
+    final formattedInteger = integerPart.toString().replaceAllMapped(
+      RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'),
+      (Match match) => '${match[1]},'
+    );
+    
+    return decimalPart.isNotEmpty ? '$formattedInteger.$decimalPart' : formattedInteger;
+  }
+
+  /// 종가 데이터 확인 다이얼로그 표시
+  void _showStockPriceDialog(String stockCode, String stockName) {
+    showDialog(
+      context: context,
+      builder: (context) => StockPriceDialog(
+        stockCode: stockCode,
+        stockName: stockName,
+      ),
+    );
+  }
+
+  /// 지표별 실제 값 텍스트 생성
+  String _getActualValueText(String indicatorName, Map<String, dynamic> analysis) {
+    final technicalData = analysis['technicalData'] as Map<String, dynamic>? ?? {};
+    final currentPrice = (analysis['currentPrice'] as num?)?.toDouble() ?? 0.0;
+    
+    switch (indicatorName.toLowerCase()) {
+      case 'rsi':
+        final value = (technicalData['rsi'] as num?)?.toDouble();
+        if (value == null || value == 0.0) return 'RSI 데이터 없음';
+        return 'RSI ${value.toStringAsFixed(1)}';
+        
+      case 'macd':
+        final macdValue = (technicalData['macd'] as num?)?.toDouble();
+        final signalValue = (technicalData['signal'] as num?)?.toDouble();
+        if (macdValue == null || signalValue == null) return 'MACD 데이터 없음';
+        return 'MACD ${macdValue.toStringAsFixed(4)} / 신호선 ${signalValue.toStringAsFixed(4)}';
+        
+      case 'bollinger':
+        final upper = (technicalData['bbUpper'] as num?)?.toDouble();
+        final middle = (technicalData['bbMiddle'] as num?)?.toDouble();
+        final lower = (technicalData['bbLower'] as num?)?.toDouble();
+        if (upper == null || middle == null || lower == null) return '볼린저밴드 데이터 없음';
+        
+        final bandWidth = upper - lower;
+        final position = bandWidth > 0 ? ((currentPrice - lower) / bandWidth) * 100 : 50.0;
+        return '현재가 ${_formatNumber(currentPrice)} (${position.toStringAsFixed(1)}%)';
+        
+      case 'movingaverage':
+        final ma5 = (technicalData['ma5'] as num?)?.toDouble();
+        final ma20 = (technicalData['ma20'] as num?)?.toDouble();
+        final ma60 = (technicalData['ma60'] as num?)?.toDouble();
+        if (ma5 == null || ma20 == null || ma60 == null) return '이동평균선 데이터 없음';
+        return '현재가 ${_formatNumber(currentPrice)} / MA5 ${_formatNumber(ma5)} / MA20 ${_formatNumber(ma20)}';
+        
+      case 'volume':
+        final current = (technicalData['currentVolume'] as num?)?.toDouble();
+        final average = (technicalData['avgVolume'] as num?)?.toDouble();
+        if (current == null || average == null || average == 0) return '거래량 데이터 없음';
+        
+        final ratio = current / average;
+        return '거래량 ${_formatNumber(current)} (평균의 ${ratio.toStringAsFixed(1)}배)';
+        
+      case 'vwap':
+        final vwap = (technicalData['vwap'] as num?)?.toDouble();
+        if (vwap == null || vwap == 0) return 'VWAP 데이터 없음';
+        
+        final difference = currentPrice > 0 ? ((currentPrice - vwap) / vwap) * 100 : 0.0;
+        return '현재가 ${_formatNumber(currentPrice)} / VWAP ${_formatNumber(vwap)} (${difference.toStringAsFixed(1)}%)';
+        
+      case 'adx':
+        final value = (technicalData['adx'] as num?)?.toDouble();
+        if (value == null || value == 0.0) return 'ADX 데이터 없음';
+        return 'ADX ${value.toStringAsFixed(1)}';
+        
+      default:
+        return '';
+    }
+  }
+
+  /// 추천종목 탭
+  Widget _buildRecommendedStocksTab() {
+    if (_isLoading || _isFirstLoading) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: const [
+            CircularProgressIndicator(),
+            SizedBox(height: 12),
+            Text('추천종목을 분석중입니다...', style: TextStyle(color: Colors.grey)),
+          ],
+        ),
+      );
+    }
+    
+    // 추천종목 데이터는 독립 화면에서만 처리. 여기서는 안내 UI만 표시
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.star_outline, size: 56, color: Colors.amber),
+          const SizedBox(height: 12),
+          const Text('추천종목은 전용 화면에서 제공합니다.',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          
+          // 🧪 테스트 분석 버튼 (001340, 096770만)
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.symmetric(horizontal: 32),
+            child: ElevatedButton.icon(
+              onPressed: _testAnalysis,
+              icon: const Icon(Icons.science, color: Colors.white),
+              label: const Text(
+                '🧪 테스트 분석 (001340, 096770)',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.orange[600],
+                padding: const EdgeInsets.symmetric(vertical: 12.0),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8.0),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (context) => const RecommendedStocksScreen(),
+                ),
+              );
+            },
+            icon: const Icon(Icons.arrow_forward),
+            label: const Text('추천종목 화면으로 이동'),
+          ),
+        ],
+      ),
+    );
+    
+    return Column(
+      children: [
+        // 헤더 정보
+        Container(
+          padding: const EdgeInsets.all(16),
+          color: Colors.grey[50],
+          child: Row(
+            children: [
+              Icon(Icons.star, color: Colors.amber, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                '추천종목 (상위 ${_recommendedStocks.length}개)',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.amber[700],
+                ),
+              ),
+              const Spacer(),
+              Text(
+                '종합점수 높은 순으로 정렬',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey[600],
+                ),
+              ),
+            ],
+          ),
+        ),
+        
+        // 추천종목 목록
+        Expanded(
+          child: ListView.builder(
+            itemCount: _recommendedStocks.length,
+            itemBuilder: (context, index) {
+              final stock = _recommendedStocks[index];
+              final stockCode = stock['stockCode'] ?? '';
+              final stockName = stock['stockName'] ?? '';
+              final compositeScore = stock['compositeScore'] ?? 0.0;
+              final currentPrice = stock['currentPrice'] ?? 0.0;
+              final priceChange = stock['priceChange'] ?? 0.0;
+              final priceChangePercent = stock['priceChangePercent'] ?? 0.0;
+              
+              return Card(
+                margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                child: ListTile(
+                  contentPadding: const EdgeInsets.all(16),
+                  leading: CircleAvatar(
+                    backgroundColor: _getScoreColor(compositeScore),
+                    child: Text(
+                      compositeScore.toStringAsFixed(3),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                  title: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          stockName,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.grey[200],
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          stockCode,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey[700],
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Text(
+                            '종합점수: ',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey[600],
+                            ),
+                          ),
+                          Text(
+                            '${compositeScore.toStringAsFixed(1)}',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: _getScoreColor(compositeScore),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Text(
+                            '현재가: ',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey[600],
+                            ),
+                          ),
+                          Text(
+                            currentPrice > 0 ? '${_formatNumber(currentPrice)}원' : '데이터 없음',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: currentPrice > 0 ? null : Colors.grey,
+                            ),
+                          ),
+                          if (currentPrice > 0) ...[
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: priceChange >= 0 ? Colors.red[100] : Colors.blue[100],
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                '${priceChange >= 0 ? '+' : ''}${_formatNumber(priceChange)} (${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toStringAsFixed(2)}%)',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: priceChange >= 0 ? Colors.red[700] : Colors.blue[700],
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ),
+                  trailing: IconButton(
+                    onPressed: () => _showStockPriceDialog(stockCode, stockName),
+                    icon: const Icon(Icons.info_outline),
+                    tooltip: '상세 정보',
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 종합점수에 따른 색상 반환
+  Color _getScoreColor(double score) {
+    if (score >= 80) return Colors.green;
+    if (score >= 60) return Colors.orange;
+    if (score >= 40) return Colors.yellow[700]!;
+    return Colors.red;
+  }
+
+  /// 투자스타일 & 백테스트 탭
+  Widget _buildInvestmentStyleAndBacktestTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 투자 스타일 정보 카드
+          _buildInvestmentStyleInfoCard(),
+          const SizedBox(height: 16),
+          
+          // 투자스타일별 상세 조건
+          _buildInvestmentStyleConditions(),
+          const SizedBox(height: 16),
+          
+          // 백테스트 결과 섹션
+          _buildBacktestResultsSection(),
+          const SizedBox(height: 16),
+          
+          // 기술적 지표 계산 공식
+          _buildTechnicalIndicatorsFormulas(),
+          const SizedBox(height: 16),
+          
+          // 분석 프로세스 흐름도
+          _buildAnalysisFlowDiagram(),
+        ],
+      ),
+    );
+  }
+
+  /// 백테스트 결과 섹션
+  Widget _buildBacktestResultsSection() {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.bar_chart, color: Colors.blue, size: 20),
+                const SizedBox(width: 8),
+                Text(
+                  '백테스트 결과',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.blue,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Text(
+              '현재 투자스타일: ${_getStyleName(_styleManager.currentStyle)}',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: _getStyleColor(_styleManager.currentStyle),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              '백테스트 기능은 분석탭에서 자동으로 실행되며, 투자스타일별로 최적화된 매매 전략을 검증합니다.',
+              style: TextStyle(
+                fontSize: 14,
+                color: Colors.grey[600],
+              ),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: () {
+                // 백테스트 실행 (실제로는 이미 자동으로 실행됨)
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('백테스트는 분석탭에서 자동으로 실행됩니다.'),
+                    backgroundColor: Colors.blue,
+                  ),
+                );
+              },
+              icon: Icon(Icons.play_arrow),
+              label: Text('백테스트 정보 보기'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 자동매매 상태 로드
+  Future<void> _loadAutoTradingStatus() async {
+    try {
+      // ApiConfig를 통해 정확한 자동매매 상태 로드
+      final isEnabled = await ApiConfig.instance.getAutoTradingEnabled();
+      if (mounted) {
+        setState(() {
+          _isAutoTradingEnabled = isEnabled;
+        });
+      }
+    } catch (e) {
+      print('❌ 자동매매 상태 로드 실패: $e');
+      // 실패 시 SharedPreferences에서 로드
+      final prefs = await SharedPreferences.getInstance();
+      final isEnabled = prefs.getBool('auto_trading_enabled') ?? false;
+      if (mounted) {
+        setState(() {
+          _isAutoTradingEnabled = isEnabled;
+        });
+      }
+    }
+  }
+
+}
