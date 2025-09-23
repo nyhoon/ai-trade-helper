@@ -120,4 +120,34 @@ class StockFilterUtils {
       return true;
     }).toList();
   }
+
+  /// 종합 필터링 (상장폐지 + ETF/ETN/펀드 제외)
+  bool shouldIncludeStock({
+    required String market,
+    String? scrtGrpClsCode,
+    String? name,
+  }) {
+    // 나스닥/NYSE 등 미국 시장은 ETF 필터 미적용
+    final upperMarket = market.toUpperCase();
+    if (upperMarket == 'NASDAQ' || upperMarket == 'NAS' || upperMarket == 'NYSE' || upperMarket == 'NYS') {
+      return true;
+    }
+    // 기존 국내/기타 시장 필터 유지
+    // ETF/ETN/펀드 제외 (데이터 기반)
+    if (_etpByCode(scrtGrpClsCode)) return false;
+    // 종목명 기반 ETF/ETN/펀드 제외
+    if (_etpByName(name)) return false;
+    return true;
+  }
+
+  bool _etpByCode(String? code) {
+    final c = (code ?? '').toUpperCase();
+    return c == 'EF' || c == 'EN' || c == 'FE' || c == 'FN' || c == 'FD';
+  }
+
+  bool _etpByName(String? name) {
+    if (name == null) return false;
+    final n = name.toLowerCase();
+    return n.contains('etf') || n.contains('etn') || n.contains('trust') || n.contains('fund');
+  }
 }

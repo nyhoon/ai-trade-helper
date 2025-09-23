@@ -24,6 +24,10 @@ import 'kis_unified_api_service_market.dart';
 import 'kis_unified_api_service_websocket.dart';
 import 'kis_unified_api_service_extensions.dart';
 import '../constants/chart_constants.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import '../trading/market_time_validator.dart';
+import '../data/stock_master_parser.dart';
 
 /// KIS 공식 가이드라인 준수 통일 API 서비스
 class KisUnifiedApiService {
@@ -329,7 +333,76 @@ class KisUnifiedApiService {
           final output = response.data['output'];
           if (output != null) {
             print('✅ [통일API] 국내주식 현재가 조회 성공: $stockCode');
-            return _parseDomesticStockPriceResponse(output);
+            final parsed = _parseDomesticStockPriceResponse(output);
+            // Firestore prices 업서트(denormalize)
+            try {
+              final nowMs = DateTime.now().millisecondsSinceEpoch;
+              final market = MarketTimeValidator.instance.getMarketFromSymbol(stockCode);
+              final stockName = (parsed['stockName'] ?? '').toString().trim().isNotEmpty
+                  ? (parsed['stockName'] ?? '').toString()
+                  : (StockMasterParser().getStockInfo(stockCode)?['name']?.toString() ?? '');
+              // 보정 계산
+              final pr = parsed['prpr'] as num?;
+              final pc = parsed['stck_prdy_clpr'] as num?;
+              num? diff = parsed['diff'] as num?;
+              num? rate = parsed['rate'] as num?;
+              if ((diff == null || diff == 0) && pr != null && pc != null) {
+                diff = pr - pc;
+              }
+              if ((rate == null || rate == 0) && pr != null && pc != null && pc != 0) {
+                rate = ((pr - pc) / pc) * 100;
+              }
+              await FirebaseFirestore.instance.collection('prices').doc(stockCode).set({
+                'stock_name': stockName,
+                'market': market,
+                'current_price': pr ?? 0,
+                'prev_close': pc ?? 0,
+                'change_amount': diff ?? 0,
+                'change_rate': rate ?? 0,
+                'volume': parsed['acml_vol'] ?? 0,
+                'trade_amount': 0,
+                'high_price': parsed['high'] ?? 0,
+                'low_price': parsed['low'] ?? 0,
+                'open_price': parsed['open'] ?? 0,
+                'market_cap': null,
+                'per': null,
+                'pbr': null,
+                'timestamp': nowMs,
+              }, SetOptions(merge: true));
+
+              // Fallback: 값이 비어 있으면 일봉 2개로 보정 (현재/전일 종가, 거래량)
+              final needFallback = (pr == null || pr == 0) || (pc == null || pc == 0) || (parsed['acml_vol'] == null || parsed['acml_vol'] == 0);
+              if (needFallback) {
+                try {
+                  final raw = await getDomesticDailyChart(stockCode: stockCode, count: 2);
+                  if (raw.isNotEmpty) {
+                    final last = raw.first;
+                    final prev = raw.length > 1 ? raw[1] : null;
+                    final closeNow = parseDouble(last['stck_clpr']);
+                    final volNow = parseInt(last['acml_vol']);
+                    final prevClose = prev != null ? parseDouble(prev['stck_clpr']) : null;
+                    double? diff2;
+                    double? rate2;
+                    if (closeNow != null && prevClose != null) {
+                      diff2 = closeNow - prevClose;
+                      if (prevClose != 0) rate2 = (diff2 / prevClose) * 100;
+                    }
+                    await FirebaseFirestore.instance.collection('prices').doc(stockCode).set({
+                      'current_price': closeNow ?? pr ?? 0,
+                      'prev_close': prevClose ?? pc ?? 0,
+                      'volume': volNow ?? parsed['acml_vol'] ?? 0,
+                      'change_amount': diff2 ?? (pr != null && pc != null ? (pr - pc) : 0),
+                      'change_rate': rate2 ?? ((pr != null && pc != null && pc != 0) ? ((pr - pc) / pc) * 100 : 0),
+                    }, SetOptions(merge: true));
+                  }
+                } catch (e) {
+                  print('⚠️ domestic chart fallback 실패: $e');
+                }
+              }
+            } catch (e) {
+              print('⚠️ Firestore prices 업서트 실패(domestic): $e');
+            }
+            return parsed;
           }
         }
         
@@ -430,6 +503,48 @@ class KisUnifiedApiService {
           final parsed = _parseOverseasStockPriceResponse(output1);
           print('🔍 [API] 파싱된 데이터: $parsed');
 
+          // Firestore prices 업서트(denormalize)
+          try {
+            final nowMs = DateTime.now().millisecondsSinceEpoch;
+            final market = MarketTimeValidator.instance.getMarketFromSymbol(symbol);
+            // 해외 종목명 보강: 응답 후보키 → 마스터 → 티커
+            String name = '';
+            final candidates = [
+              parsed['stockName'],
+              parsed['name'],
+              parsed['shortName'],
+              parsed['hts_kor_isnm'],
+            ];
+            for (final c in candidates) {
+              final s = (c ?? '').toString();
+              if (s.trim().isNotEmpty) { name = s; break; }
+            }
+            if (name.isEmpty) {
+              name = (StockMasterParser().getStockInfo(symbol)?['name']?.toString() ?? '').trim();
+            }
+            if (name.isEmpty) name = symbol; // 최후 폴백
+
+            await FirebaseFirestore.instance.collection('prices').doc(symbol).set({
+              'stock_name': name,
+              'market': market,
+              'current_price': parsed['last'] ?? parsed['prpr'] ?? 0,
+              'prev_close': parsed['prevClose'] ?? 0,
+              'change_amount': parsed['change'] ?? 0,
+              'change_rate': parsed['changeRate'] ?? 0,
+              'volume': parsed['volume'] ?? 0,
+              'trade_amount': parsed['totalValue'] ?? 0,
+              'high_price': parsed['high'] ?? 0,
+              'low_price': parsed['low'] ?? 0,
+              'open_price': parsed['open'] ?? 0,
+              'market_cap': parsed['marketCap'],
+              'per': parsed['pe'],
+              'pbr': parsed['pb'],
+              'timestamp': nowMs,
+            }, SetOptions(merge: true));
+          } catch (e) {
+            print('⚠️ Firestore prices 업서트 실패(overseas): $e');
+          }
+
           // 보조: 시가/고가/저가가 없으면 price API로 보강
           final hasOhl = (parsed['open'] ?? 0.0) != 0.0 ||
                         (parsed['high'] ?? 0.0) != 0.0 ||
@@ -447,29 +562,76 @@ class KisUnifiedApiService {
                 trId: 'HHDFS00000300',
               );
               if (priceResp.statusCode == 200 && priceResp.data['rt_cd'] == '0') {
-                final out = priceResp.data['output'];
-                if (out != null) {
-                  parsed['open'] = parseDouble(out['open']);
-                  parsed['high'] = parseDouble(out['high']);
-                  parsed['low'] = parseDouble(out['low']);
+                final priceOut = priceResp.data['output'];
+                if (priceOut != null) {
+                  final open = parseDouble(priceOut['open']);
+                  final high = parseDouble(priceOut['high']);
+                  final low = parseDouble(priceOut['low']);
+                  final prevClose2 = parseDouble(priceOut['previousClose'] ?? priceOut['prevClose']);
+                  final volume2 = parseInt(priceOut['tvol'] ?? priceOut['acml_vol'] ?? priceOut['volume']);
+                  final totalValue2 = parseDouble(priceOut['totalValue'] ?? priceOut['tradeAmount']);
+                  double? changeAmt2 = parseDouble(priceOut['change']);
+                  double? changeRt2 = parseDouble(priceOut['changeRate'] ?? priceOut['pctChange']);
+                  // 보정 계산
+                  final lastNow = parseDouble(priceOut['last']) ?? parsed['last'];
+                  if ((changeAmt2 == null || changeAmt2 == 0) && lastNow != null && prevClose2 != null) {
+                    changeAmt2 = lastNow - prevClose2;
+                  }
+                  if ((changeRt2 == null || changeRt2 == 0) && lastNow != null && prevClose2 != null && prevClose2 != 0) {
+                    changeRt2 = ((lastNow - prevClose2) / prevClose2) * 100;
+                  }
+                  await FirebaseFirestore.instance.collection('prices').doc(symbol).set({
+                    'open_price': open ?? 0,
+                    'high_price': high ?? 0,
+                    'low_price': low ?? 0,
+                    'prev_close': prevClose2 ?? FieldValue.delete(),
+                    'volume': volume2 ?? FieldValue.delete(),
+                    'trade_amount': totalValue2 ?? FieldValue.delete(),
+                    'change_amount': changeAmt2 ?? FieldValue.delete(),
+                    'change_rate': changeRt2 ?? FieldValue.delete(),
+                  }, SetOptions(merge: true));
                 }
               }
             } catch (_) {}
+          }
+
+          // 최종 Fallback: 여전히 주요 값이 0이면 일봉 2개로 보정
+          try {
+            final chart = await getDailyChart(symbol, count: 2);
+            if (chart.isNotEmpty) {
+              final last = chart.first;
+              final prev = chart.length > 1 ? chart[1] : null;
+              final closeNow = parseDouble(last['close'] ?? last['prpr'] ?? last['last']);
+              final volNow = parseInt(last['volume']);
+              final prevClose = prev != null ? parseDouble(prev['close']) : null;
+              double? diff2;
+              double? rate2;
+              if (closeNow != null && prevClose != null) {
+                diff2 = closeNow - prevClose;
+                if (prevClose != 0) rate2 = (diff2 / prevClose) * 100;
+              }
+              await FirebaseFirestore.instance.collection('prices').doc(symbol).set({
+                'current_price': closeNow ?? parsed['last'] ?? 0,
+                'prev_close': prevClose ?? parsed['prevClose'] ?? 0,
+                'volume': volNow ?? parsed['volume'] ?? 0,
+                'change_amount': diff2 ?? (parsed['last'] != null && parsed['prevClose'] != null ? (parsed['last'] - parsed['prevClose']) : 0),
+                'change_rate': rate2 ?? ((parsed['last'] != null && parsed['prevClose'] != null && parsed['prevClose'] != 0) ? ((parsed['last'] - parsed['prevClose']) / parsed['prevClose']) * 100 : 0),
+              }, SetOptions(merge: true));
+            }
+          } catch (e) {
+            print('⚠️ overseas chart fallback 실패: $e');
           }
 
           return parsed;
         }
       }
       
-      print('❌ [통일API] 해외주식 현재가 조회 실패: $symbol (거래소: $exchangeCode)');
+      print('❌ [API] 해외주식 현재가 조회 실패:');
       print('  - Status Code: ${response.statusCode}');
-      print('  - rt_cd: ${response.data['rt_cd']}');
-      print('  - msg_cd: ${response.data['msg_cd']}');
-      print('  - msg1: ${response.data['msg1']}');
       print('  - Response Data: ${response.data}');
       return null;
     } catch (e) {
-      print('❌ [통일API] 해외주식 현재가 조회 오류: $e');
+      print('❌ [API] 해외주식 현재가 조회 오류: $e');
       return null;
     }
   }

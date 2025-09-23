@@ -1264,10 +1264,10 @@ class AppDataManager {
       if ((h['prpr'] ?? 0.0) == 0.0 && code.isNotEmpty) {
         try {
           final excg = (h['excg'] as String? ?? '').toUpperCase();
-          // KIS 1호가(EXCD)는 NASD/NYSE 코드 사용
+          // KIS 1호가(EXCD) 표준: NAS(나스닥), NYS(뉴욕)
           final exchangeCode = excg.isEmpty
-              ? 'NASD'
-              : (excg.startsWith('NY') ? 'NYSE' : (excg.startsWith('NAS') ? 'NASD' : excg));
+              ? 'NAS'
+              : (excg.startsWith('NY') ? 'NYS' : (excg.startsWith('NAS') ? 'NAS' : excg));
           final data = await _unifiedApiService.getOverseasStockPrice(symbol: code, exchangeCode: exchangeCode);
           final last = _extractPrice(data);
           if (last > 0) {

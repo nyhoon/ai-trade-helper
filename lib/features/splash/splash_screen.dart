@@ -18,6 +18,7 @@ import '../../core/services/integrated_monitoring_service.dart';
 import '../../core/services/performance_monitor.dart';
 import '../../core/testing/integrated_test_system.dart';
 import '../../core/api/kis_unified_api_service.dart';
+import '../../core/trading/market_time_validator.dart';
 import '../../core/trading/auto_trading_cycle.dart';
 import '../main/main_screen.dart';
 import '../onboarding/api_key_setup_screen.dart';
@@ -591,23 +592,49 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
         }
       }
       
-      // 보유종목 추가 (중복 제거)
+      // 보유종목 추가 (중복 제거) - 키 보정 및 시장 보강
       for (final item in holdings) {
-        final stockCode = item['stockCode']?.toString();
-        if (stockCode != null && stockCode.isNotEmpty && !allStocks.containsKey(stockCode)) {
+        final stockCode = (item['stockCode'] ?? item['pdno'])?.toString();
+        if (stockCode == null || stockCode.isEmpty) continue;
+        final name = (item['stockName'] ?? item['prdt_name'])?.toString() ?? '';
+        // 시장 보강: 마스터/휴리스틱
+        String market = 'UNKNOWN';
+        try {
+          final info = StockMasterParser().getStockInfo(stockCode);
+          market = (info?['market']?.toString() ?? 'UNKNOWN');
+        } catch (_) {}
+        if (market == 'UNKNOWN') {
+          market = MarketTimeValidator.instance.getMarketFromSymbol(stockCode);
+        }
+        if (!allStocks.containsKey(stockCode)) {
           allStocks[stockCode] = {
             'stock_code': stockCode,
-            'stock_name': item['stockName']?.toString() ?? '',
-            'market': 'UNKNOWN', // 보유종목은 시장 정보가 없을 수 있음
+            'stock_name': name,
+            'market': market,
             'type': 'holdings',
           };
-        } else if (stockCode != null && allStocks.containsKey(stockCode)) {
-          // 이미 관심종목에 있으면 타입을 'both'로 변경
+        } else {
           allStocks[stockCode]!['type'] = 'both';
+          // 시장 정보가 더 정확하면 갱신
+          if ((allStocks[stockCode]!['market'] ?? 'UNKNOWN') == 'UNKNOWN' && market != 'UNKNOWN') {
+            allStocks[stockCode]!['market'] = market;
+          }
         }
       }
       
-      final uniqueStocks = allStocks.values.toList();
+      // 보유 종목 우선순위 높이기
+      final uniqueStocks = allStocks.values.toList()
+        ..sort((a, b) {
+          final ta = (a['type'] ?? '').toString();
+          final tb = (b['type'] ?? '').toString();
+          if (ta == tb) return 0;
+          // both > holdings > watchlist
+          if (ta == 'both') return -1;
+          if (tb == 'both') return 1;
+          if (ta == 'holdings') return -1;
+          if (tb == 'holdings') return 1;
+          return 0;
+        });
       print('📊 중복 제거된 종목: ${uniqueStocks.length}개');
       
       // 4. 필수 데이터만 로딩 (메모리 최적화)
@@ -617,8 +644,8 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
       final totalCount = uniqueStocks.length;
       
       if (totalCount > 0) {
-        // 메모리 부족 방지를 위해 최대 10개 종목만 처리
-        final maxStocks = totalCount > 10 ? 10 : totalCount;
+        // 메모리 선처리 개수 상향(보유 종목 우선)
+        final maxStocks = totalCount > 30 ? 30 : totalCount;
         final essentialStocks = uniqueStocks.take(maxStocks).toList();
         
         print('📊 필수 데이터 로딩: $maxStocks개 종목 (전체 $totalCount개 중)');
@@ -638,6 +665,9 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
             
             // 현재가 데이터만 로딩 (차트 데이터는 백그라운드에서 처리)
             await _dataManager.loadCurrentPriceData(stockCode, market);
+
+            // Firestore prices 채우기 보장: @api 현재가 호출(국내/해외 분기)
+            await _fetchPriceWithRetry(stockCode: stockCode, market: market);
             
             print('✅ $stockCode ($stockName) 현재가 데이터 로딩 완료');
             loadedCount++;
@@ -699,6 +729,8 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
             try {
               // 현재가 데이터만 로딩
               await _dataManager.loadCurrentPriceData(stockCode, market);
+              // Firestore prices 채우기 보장: @api 현재가 호출(국내/해외 분기)
+              await _fetchPriceWithRetry(stockCode: stockCode, market: market, isBackground: true);
               
               // 메모리 정리를 위한 대기
               await Future.delayed(const Duration(milliseconds: 200));
@@ -718,6 +750,35 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
         print('❌ 백그라운드 데이터 로딩 실패: $e');
       }
     });
+  }
+
+  /// 현재가 API 호출 보장 + 재시도(최대 2회). 국내/해외 자동 분기
+  Future<void> _fetchPriceWithRetry({required String stockCode, required String market, bool isBackground = false}) async {
+    final api = KisUnifiedApiService();
+    final isDomestic = RegExp(r'^[0-9]{6}$').hasMatch(stockCode);
+    const int maxRetries = 2;
+    for (int attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        if (isDomestic) {
+          await api.getDomesticStockPrice(stockCode: stockCode);
+        } else {
+          // 거래소 코드 추정: 시장/심볼 기반
+          final excd = (market == 'NYSE' || market == 'NYS') ? 'NYS' : 'NAS';
+          await api.getOverseasStockPrice(symbol: stockCode, exchangeCode: excd);
+        }
+        // 성공 시 탈출
+        break;
+      } catch (e) {
+        if (attempt == maxRetries) {
+          print('❌ 현재가 API 최종 실패($stockCode): $e');
+        } else {
+          final delayMs = 500 * (attempt + 1);
+          final tag = isBackground ? '(bg)' : '';
+          print('⚠️ $tag 현재가 API 실패 재시도($stockCode) - ${attempt + 1}/$maxRetries (${delayMs}ms 후)');
+          await Future.delayed(Duration(milliseconds: delayMs));
+        }
+      }
+    }
   }
 
   /// 데이터베이스 최적화 (백그라운드에서 처리)
