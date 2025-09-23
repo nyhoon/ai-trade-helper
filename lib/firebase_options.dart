@@ -71,4 +71,5 @@ class DefaultFirebaseOptions {
     storageBucket: 'device-streaming-f5775762.firebasestorage.app',
     iosBundleId: 'com.example.tradeAppNewClean',
   );
+
 }

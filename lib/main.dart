@@ -9,6 +9,8 @@ import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'firebase_options.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'core/data/firebase_migration.dart';
 import 'core/state/trading_bloc.dart';
 import 'core/state/auto_trading_bloc.dart';
 import 'core/trading/background_trading_service.dart';
@@ -60,6 +62,30 @@ void main() async {
       options: DefaultFirebaseOptions.currentPlatform,
     );
     print('✅ Firebase initialize 완료');
+    // 인증(익명 로그인) - Firestore 쓰기 권한 확보용 (채널 초기화 이슈 대비 재시도)
+    Future<void> _signInAnonWithRetry({int maxRetries = 3}) async {
+      for (int attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          final cred = await FirebaseAuth.instance.signInAnonymously();
+          print('✅ Firebase Auth 익명 로그인: ${cred.user?.uid}');
+          return;
+        } catch (e) {
+          print('❌ Firebase Auth 로그인 실패(${attempt}/$maxRetries): $e');
+          if (attempt == maxRetries) rethrow;
+          await Future<void>.delayed(const Duration(milliseconds: 600));
+        }
+      }
+    }
+    await _signInAnonWithRetry();
+    // 일회성 로컬DB → Firestore 마이그레이션 실행 플래그
+    const bool kRunFirestoreMigrationOnce = true; // 실행 후 false로 변경하세요
+    if (kRunFirestoreMigrationOnce) {
+      print('🚚 Firestore 마이그레이션 시작');
+      final currentUid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+      await FirebaseMigrationService(firestore: FirebaseFirestore.instance)
+          .migrateAll(uid: currentUid);
+      print('✅ Firestore 마이그레이션 완료');
+    }
     await pingFirestoreOnce();
     print('✅ Firestore ping 완료');
     await ApiConfig.instance.initialize();
