@@ -6,6 +6,9 @@ import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 import 'package:flutter/foundation.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'core/state/trading_bloc.dart';
 import 'core/state/auto_trading_bloc.dart';
 import 'core/trading/background_trading_service.dart';
@@ -24,6 +27,12 @@ import 'core/services/realtime_score_service.dart';
 import 'features/splash/splash_screen.dart';
 import 'features/main/main_screen.dart';
 import 'features/onboarding/api_key_setup_screen.dart';
+
+Future<void> pingFirestoreOnce() async {
+  final docRef = FirebaseFirestore.instance.collection('app_health').doc('ping');
+  await docRef.set({'ts': DateTime.now().toIso8601String()}, SetOptions(merge: true));
+  await docRef.get();
+}
 
 void main() async {
   // Flutter 바인딩 초기화
@@ -47,6 +56,12 @@ void main() async {
   // 나머지 초기화는 스플래시에서 진행되므로 여기서는 최소화
   try {
     print('🚀 main() 경량 초기화 시작');
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+    print('✅ Firebase initialize 완료');
+    await pingFirestoreOnce();
+    print('✅ Firestore ping 완료');
     await ApiConfig.instance.initialize();
     await AppDataManager.instance.initialize();
     await BackgroundTradingService().initialize();

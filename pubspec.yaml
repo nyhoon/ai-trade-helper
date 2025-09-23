@@ -87,6 +87,9 @@ dependencies:
 
   # 엑셀 파일 파싱
   excel: ^2.1.0
+  firebase_core: ^4.1.1
+  cloud_firestore: ^6.0.2
+  cloud_functions: ^6.0.2
 
 dev_dependencies:
   flutter_test:
