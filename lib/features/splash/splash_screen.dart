@@ -19,6 +19,7 @@ import '../../core/services/performance_monitor.dart';
 import '../../core/testing/integrated_test_system.dart';
 import '../../core/api/kis_unified_api_service.dart';
 import '../../core/trading/market_time_validator.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../core/trading/auto_trading_cycle.dart';
 import '../main/main_screen.dart';
 import '../onboarding/api_key_setup_screen.dart';
@@ -579,17 +580,27 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
       // 3. 중복 제거된 종목 목록 생성
       final allStocks = <String, Map<String, dynamic>>{};
       
-      // 관심종목 추가
+      // 관심종목 추가 (시장/이름 보강)
       for (final item in watchlist) {
         final stockCode = item['stock_code']?.toString();
-        if (stockCode != null && stockCode.isNotEmpty) {
-          allStocks[stockCode] = {
-            'stock_code': stockCode,
-            'stock_name': item['stock_name']?.toString() ?? '',
-            'market': item['market']?.toString() ?? 'UNKNOWN',
-            'type': 'watchlist',
-          };
+        if (stockCode == null || stockCode.isEmpty) continue;
+        String stockName = item['stock_name']?.toString() ?? '';
+        String market = item['market']?.toString() ?? 'UNKNOWN';
+        if (stockName.isEmpty) {
+          try { stockName = (StockMasterParser().getStockInfo(stockCode)?['name']?.toString() ?? ''); } catch (_) {}
         }
+        if (market == 'UNKNOWN' || market.isEmpty) {
+          try { market = (StockMasterParser().getStockInfo(stockCode)?['market']?.toString() ?? 'UNKNOWN'); } catch (_) {}
+          if (market == 'UNKNOWN' || market.isEmpty) {
+            market = MarketTimeValidator.instance.getMarketFromSymbol(stockCode);
+          }
+        }
+        allStocks[stockCode] = {
+          'stock_code': stockCode,
+          'stock_name': stockName,
+          'market': market,
+          'type': 'watchlist',
+        };
       }
       
       // 보유종목 추가 (중복 제거) - 키 보정 및 시장 보강
@@ -668,6 +679,13 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
 
             // Firestore prices 채우기 보장: @api 현재가 호출(국내/해외 분기)
             await _fetchPriceWithRetry(stockCode: stockCode, market: market);
+
+            // 차트 컬렉션 생성(옵션): 로컬 DB 제거 대비 Firestore에 기본 ohlcv 업서트
+            try {
+              await _loadChartDataForStock(stockCode, market);
+            } catch (e) {
+              print('⚠️ 차트 업서트 시도 실패($stockCode): $e');
+            }
             
             print('✅ $stockCode ($stockName) 현재가 데이터 로딩 완료');
             loadedCount++;
@@ -731,6 +749,13 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
               await _dataManager.loadCurrentPriceData(stockCode, market);
               // Firestore prices 채우기 보장: @api 현재가 호출(국내/해외 분기)
               await _fetchPriceWithRetry(stockCode: stockCode, market: market, isBackground: true);
+
+              // 백그라운드에서도 차트 업서트 시도
+              try {
+                await _loadChartDataForStock(stockCode, market);
+              } catch (e) {
+                print('⚠️(bg) 차트 업서트 시도 실패($stockCode): $e');
+              }
               
               // 메모리 정리를 위한 대기
               await Future.delayed(const Duration(milliseconds: 200));
@@ -836,10 +861,16 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
         
         // 해외주식 데이터를 표준화된 형식으로 변환
         chartData = rawData.map((item) {
+          // 날짜를 YYYYMMDD로 통일
+          String dateStr = (item['date'] ?? '').toString();
+          if (dateStr.contains('-')) {
+            // YYYY-MM-DD -> YYYYMMDD
+            dateStr = dateStr.replaceAll('-', '');
+          }
           return {
             'stock_code': stockCode,
             'market': market,
-            'date': item['date'] ?? DateTime.now().toString().substring(0, 10),
+            'date': dateStr.isNotEmpty ? dateStr : DateTime.now().toString().substring(0, 10).replaceAll('-', ''),
             'open': item['open'] ?? 0.0,
             'high': item['high'] ?? 0.0,
             'low': item['low'] ?? 0.0,
@@ -856,24 +887,31 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
           count: 80,
         );
         
-        // 국내주식 원본 데이터를 차트 데이터 형식으로 변환
+        // 국내주식 데이터: 표준 키 또는 stck_* 키를 처리하고 날짜를 YYYYMMDD로 통일
         chartData = rawData.map((item) {
-          // 날짜 형식 변환 (YYYYMMDD -> YYYY-MM-DD)
-          String dateStr = item['stck_bsop_date']?.toString() ?? '';
-          if (dateStr.length == 8) {
-            dateStr = '${dateStr.substring(0, 4)}-${dateStr.substring(4, 6)}-${dateStr.substring(6, 8)}';
+          // 날짜
+          String dateStr = (item['date'] ?? item['stck_bsop_date'] ?? '').toString();
+          if (dateStr.contains('-')) {
+            dateStr = dateStr.replaceAll('-', '');
           }
-          
+          // 값 파싱(표준 키 우선 → stck_* 키 폴백)
+          double open = double.tryParse((item['open'] ?? item['stck_oprc'] ?? '0').toString()) ?? 0.0;
+          double high = double.tryParse((item['high'] ?? item['stck_hgpr'] ?? '0').toString()) ?? 0.0;
+          double low  = double.tryParse((item['low']  ?? item['stck_lwpr'] ?? '0').toString()) ?? 0.0;
+          double close= double.tryParse((item['close']?? item['stck_clpr'] ?? '0').toString()) ?? 0.0;
+          int volume   = int.tryParse((item['volume'] ?? item['acml_vol'] ?? '0').toString()) ?? 0;
+          int tradeAmt = int.tryParse((item['acml_tr_pbmn'] ?? '0').toString()) ?? 0;
+
           return {
             'stock_code': stockCode,
             'market': market,
             'date': dateStr,
-            'open': double.tryParse(item['stck_oprc']?.toString() ?? '0') ?? 0.0,
-            'high': double.tryParse(item['stck_hgpr']?.toString() ?? '0') ?? 0.0,
-            'low': double.tryParse(item['stck_lwpr']?.toString() ?? '0') ?? 0.0,
-            'close': double.tryParse(item['stck_clpr']?.toString() ?? '0') ?? 0.0,
-            'volume': int.tryParse(item['acml_vol']?.toString() ?? '0') ?? 0,
-            'trade_amount': int.tryParse(item['acml_tr_pbmn']?.toString() ?? '0') ?? 0,
+            'open': open,
+            'high': high,
+            'low': low,
+            'close': close,
+            'volume': volume,
+            'trade_amount': tradeAmt,
           };
         }).toList();
       }
@@ -882,6 +920,30 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
         // 로컬DB에 저장 (일괄 삽입)
         await _chartRepo.insertMultipleChartData(chartData);
         print('✅ $stockCode 차트 데이터 저장 완료 (${chartData.length}개)');
+        // Firestore charts에 최근 N개 업서트 (뷰 전용, 용량 제한 대비 최소 필드)
+        try {
+          final List<Map<String, dynamic>> ohlcv = chartData
+              .map((e) => {
+                    'd': e['date'],
+                    'o': e['open'],
+                    'h': e['high'],
+                    'l': e['low'],
+                    'c': e['close'],
+                    'v': e['volume'],
+                  })
+              .toList();
+          final maxN = 120; // 문서 크기 보호
+          final sliced = ohlcv.length > maxN ? ohlcv.sublist(ohlcv.length - maxN) : ohlcv;
+          await FirebaseFirestore.instance.collection('charts').doc(stockCode).set({
+            'symbol': stockCode,
+            'market': market,
+            'ohlcv': sliced,
+            'updatedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+          print('✅ Firestore charts 업서트 완료: $stockCode (${sliced.length}개)');
+        } catch (e) {
+          print('⚠️ Firestore charts 업서트 실패: $e');
+        }
         
         // 저장된 데이터 샘플 출력 (PLTZ 등 나스닥 종목 확인용)
         if (isNasdaq && chartData.length > 0) {
