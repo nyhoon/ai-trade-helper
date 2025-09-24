@@ -29,6 +29,8 @@ import 'features/splash/splash_screen.dart';
 import 'features/main/main_screen.dart';
 import 'features/onboarding/api_key_setup_screen.dart';
 import 'core/testing/integration_smoke_tests.dart';
+import 'core/data/etl_migration_service.dart';
+import 'core/remote/analysis_functions_service.dart';
 
 Future<void> pingFirestoreOnce() async {
   final docRef = FirebaseFirestore.instance.collection('app_health').doc('ping');
@@ -83,13 +85,32 @@ void main() async {
     }
     await _signInAnonWithRetry();
     // 일회성 로컬DB → Firestore 마이그레이션 실행 플래그
-    const bool kRunFirestoreMigrationOnce = true; // 실행 후 false로 변경하세요
+    const bool kRunFirestoreMigrationOnce = false; // ETL 수동 실행 권장
     if (kRunFirestoreMigrationOnce) {
       print('🚚 Firestore 마이그레이션 시작');
       final currentUid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
       await FirebaseMigrationService(firestore: FirebaseFirestore.instance)
           .migrateAll(uid: currentUid);
       print('✅ Firestore 마이그레이션 완료');
+    }
+    // 필요 시 일회성 로컬DB→Firestore ETL 실행
+    // await EtlMigrationService.instance.runEtlIfNeeded();
+
+    // 앱 시작 시 관심/보유/추천을 서버에서 1회 분석하여 analysis 채움
+    try {
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid != null) {
+        final functions = AnalysisFunctionsService();
+        // 병렬 호출로 초기 데이터 채움(관심/보유)
+        await Future.wait([
+          functions.analyzeWatchlist(uid: uid),
+          functions.analyzeHoldings(uid: uid),
+        ]);
+        // 추천 상위도 캐싱
+        await functions.getTopRecommendations(uid: uid, limit: 10);
+      }
+    } catch (e) {
+      print('⚠️ 초기 서버 분석 호출 실패: $e');
     }
     await pingFirestoreOnce();
     print('✅ Firestore ping 완료');

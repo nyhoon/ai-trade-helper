@@ -16,30 +16,50 @@ export class ChartDataService {
     try {
       console.log(`📊 차트 데이터 조회: ${symbol} (${days}일)`);
       
-      const doc = await admin.firestore()
-        .collection('charts')
-        .doc(symbol)
-        .get();
-      
-      if (!doc.exists) {
+      // 1) subcollection daily 우선
+      const dailySnap = await admin.firestore()
+        .collection('charts').doc(symbol).collection('daily')
+        .orderBy('date_ts', 'desc').limit(days).get();
+      if (!dailySnap.empty) {
+        const rows = dailySnap.docs.map(d => d.data());
+        console.log(`✅ 차트 데이터 조회 완료(daily): ${symbol} (${rows.length}개)`);
+        return rows.map(r => ({
+          date: r.date,
+          open: r.open, high: r.high, low: r.low, close: r.close,
+          volume: r.volume, trade_amount: r.trade_amount,
+        }));
+      }
+
+      // 2) 레거시 doc.data / doc.ohlcv 폴백
+      const legacyDoc = await admin.firestore().collection('charts').doc(symbol).get();
+      if (!legacyDoc.exists) {
         console.log(`⚠️ 차트 데이터 없음: ${symbol}`);
         return [];
       }
-      
-      const data = doc.data();
-      if (!data || !data.data) {
-        console.log(`⚠️ 차트 데이터 형식 오류: ${symbol}`);
-        return [];
-      }
-      
-      // 최신 데이터부터 정렬하고 요청된 일수만큼 반환
-      const chartData = Array.isArray(data.data) ? data.data : [];
-      const sortedData = chartData
-        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+      const legacy = legacyDoc.data() as any;
+      const arr = Array.isArray(legacy?.data) ? legacy.data
+        : (Array.isArray(legacy?.ohlcv) ? legacy.ohlcv : []);
+      if (!Array.isArray(arr) || arr.length === 0) return [];
+
+      const normalized = arr.map((it: any) => ({
+        date: it.date ?? it.d,
+        open: (it.open ?? it.o) as number,
+        high: (it.high ?? it.h) as number,
+        low: (it.low ?? it.l) as number,
+        close: (it.close ?? it.c) as number,
+        volume: (it.volume ?? it.v) as number,
+        trade_amount: it.trade_amount ?? it.t,
+      })).filter((it: any) => !!it.date);
+
+      // 최신 우선 정렬 후 days 만큼
+      const sorted = normalized.sort((a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime())
         .slice(0, days);
-      
-      console.log(`✅ 차트 데이터 조회 완료: ${symbol} (${sortedData.length}개)`);
-      return sortedData;
+
+      // best-effort: daily 서브컬렉션에 이식(비동기)
+      try { await this.saveChartData(symbol, sorted); } catch (_) {}
+
+      console.log(`✅ 차트 데이터 조회 완료(legacy): ${symbol} (${sorted.length}개)`);
+      return sorted;
       
     } catch (error) {
       console.error(`❌ 차트 데이터 조회 실패: ${symbol}`, error);
@@ -118,16 +138,35 @@ export class ChartDataService {
   static async saveChartData(symbol: string, chartData: any[]): Promise<void> {
     try {
       console.log(`💾 차트 데이터 저장: ${symbol} (${chartData.length}개)`);
-      
-      await admin.firestore()
-        .collection('charts')
-        .doc(symbol)
-        .set({
-          data: chartData,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          count: chartData.length
+      const col = admin.firestore().collection('charts').doc(symbol);
+      // daily subcollection 저장
+      const batch = admin.firestore().batch();
+      for (const b of chartData) {
+        const date: string = b.date ?? b.d;
+        if (!date) continue;
+        const ref = col.collection('daily').doc(date);
+        const dateTs = parseInt((date as string).replace(/-/g, ''));
+        batch.set(ref, {
+          stock_code: symbol,
+          date,
+          date_ts: isNaN(dateTs) ? null : dateTs,
+          open: b.open ?? b.o ?? 0,
+          high: b.high ?? b.h ?? 0,
+          low: b.low ?? b.l ?? 0,
+          close: b.close ?? b.c ?? 0,
+          volume: b.volume ?? b.v ?? 0,
+          trade_amount: b.trade_amount ?? b.t ?? null,
+          updated_at: admin.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
-      
+      }
+      await batch.commit();
+
+      // 요약 문서 업데이트(선택)
+      await col.set({
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        count: chartData.length,
+      }, { merge: true });
+
       console.log(`✅ 차트 데이터 저장 완료: ${symbol}`);
       
     } catch (error) {

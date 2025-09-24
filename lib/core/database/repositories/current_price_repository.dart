@@ -1,9 +1,12 @@
-import 'package:sqflite/sqflite.dart';
-import '../database_helper.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 /// 현재가 데이터 Repository - 실시간 현재가 관리
 class CurrentPriceRepository {
-  final DatabaseHelper _dbHelper = DatabaseHelper.instance;
+  DocumentReference<Map<String, dynamic>> _doc(String stockCode) =>
+      FirebaseFirestore.instance.collection('prices').doc(stockCode);
+  CollectionReference<Map<String, dynamic>> _userCol(String uid, String name) =>
+      FirebaseFirestore.instance.collection('users').doc(uid).collection(name);
 
   /// 현재가 데이터 삽입 또는 업데이트
   Future<void> insertOrUpdateCurrentPrice({
@@ -22,155 +25,100 @@ class CurrentPriceRepository {
     double? per,
     double? pbr,
   }) async {
-    final db = await _dbHelper.database;
     final now = DateTime.now().millisecondsSinceEpoch;
-
-    await db.insert(
-      'current_price',
-      {
-        'stock_code': stockCode,
-        'market': market,
-        'current_price': currentPrice,
-        'prev_close': prevClose,
-        'change_amount': changeAmount,
-        'change_rate': changeRate,
-        'volume': volume,
-        'trade_amount': tradeAmount,
-        'high_price': highPrice,
-        'low_price': lowPrice,
-        'open_price': openPrice,
-        'market_cap': marketCap,
-        'per': per,
-        'pbr': pbr,
-        'timestamp': now,
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await _doc(stockCode).set({
+      'stock_code': stockCode,
+      'market': market,
+      'current_price': currentPrice,
+      'prev_close': prevClose,
+      'change_amount': changeAmount,
+      'change_rate': changeRate,
+      'volume': volume,
+      'trade_amount': tradeAmount,
+      'high_price': highPrice,
+      'low_price': lowPrice,
+      'open_price': openPrice,
+      'market_cap': marketCap,
+      'per': per,
+      'pbr': pbr,
+      'timestamp': now,
+      'updated_at': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   }
 
   /// 여러 종목의 현재가 데이터 일괄 삽입 (최적화)
   Future<void> insertMultipleCurrentPrice(List<Map<String, dynamic>> priceDataList) async {
     if (priceDataList.isEmpty) return;
-    
-    final db = await _dbHelper.database;
     final now = DateTime.now().millisecondsSinceEpoch;
-
-    try {
-      // 트랜잭션 사용으로 락 방지 및 성능 향상
-      await db.transaction((txn) async {
-        // 배치 삽입으로 성능 향상
-        final batch = txn.batch();
-        
-        for (final data in priceDataList) {
-          batch.insert(
-            'current_price',
-            {
-              'stock_code': data['stock_code'],
-              'market': data['market'],
-              'current_price': data['current_price'],
-              'prev_close': data['prev_close'],
-              'change_amount': data['change_amount'],
-              'change_rate': data['change_rate'],
-              'volume': data['volume'],
-              'trade_amount': data['trade_amount'],
-              'high_price': data['high_price'],
-              'low_price': data['low_price'],
-              'open_price': data['open_price'],
-              'market_cap': data['market_cap'],
-              'per': data['per'],
-              'pbr': data['pbr'],
-              'timestamp': now,
-            },
-            conflictAlgorithm: ConflictAlgorithm.replace,
-          );
-        }
-        
-        // 배치 실행
-        await batch.commit(noResult: true);
-      });
-      
-      print('📊 현재가 데이터 일괄 삽입 완료: ${priceDataList.length}개');
-    } catch (e) {
-      print('❌ 현재가 데이터 일괄 삽입 실패: $e');
-      rethrow;
+    final batch = FirebaseFirestore.instance.batch();
+    for (final data in priceDataList) {
+      final code = data['stock_code'] as String;
+      batch.set(_doc(code), {
+        'stock_code': code,
+        'market': data['market'],
+        'current_price': data['current_price'],
+        'prev_close': data['prev_close'],
+        'change_amount': data['change_amount'],
+        'change_rate': data['change_rate'],
+        'volume': data['volume'],
+        'trade_amount': data['trade_amount'],
+        'high_price': data['high_price'],
+        'low_price': data['low_price'],
+        'open_price': data['open_price'],
+        'market_cap': data['market_cap'],
+        'per': data['per'],
+        'pbr': data['pbr'],
+        'timestamp': now,
+        'updated_at': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
     }
+    await batch.commit();
+    print('📊 현재가 데이터 일괄 삽입 완료(Firestore): ${priceDataList.length}개');
   }
 
   /// 특정 종목의 현재가 조회
   Future<Map<String, dynamic>?> getCurrentPrice(String stockCode) async {
-    final db = await _dbHelper.database;
-
-    final result = await db.query(
-      'current_price',
-      where: 'stock_code = ?',
-      whereArgs: [stockCode],
-      limit: 1,
-    );
-
-    if (result.isNotEmpty) {
-      return result.first;
-    }
-
+    final doc = await _doc(stockCode).get();
+    if (doc.exists) return doc.data();
     return null;
   }
 
   /// 여러 종목의 현재가 조회
   Future<Map<String, Map<String, dynamic>>> getMultipleCurrentPrice(List<String> stockCodes) async {
-    final db = await _dbHelper.database;
     final result = <String, Map<String, dynamic>>{};
-
-    if (stockCodes.isEmpty) {
-      return result;
+    if (stockCodes.isEmpty) return result;
+    final futures = stockCodes.map((c) => _doc(c).get()).toList();
+    final snaps = await Future.wait(futures);
+    for (final s in snaps) {
+      if (s.exists) {
+        final data = s.data()!;
+        result[data['stock_code'] as String] = data;
+      }
     }
-
-    final placeholders = List.filled(stockCodes.length, '?').join(',');
-    final queryResult = await db.rawQuery('''
-      SELECT * FROM current_price 
-      WHERE stock_code IN ($placeholders)
-      ORDER BY stock_code
-    ''', stockCodes);
-
-    for (final row in queryResult) {
-      result[row['stock_code'] as String] = row;
-    }
-
     return result;
   }
 
   /// 관심종목과 보유종목의 현재가 조회
   Future<Map<String, Map<String, dynamic>>> getActiveCurrentPrice() async {
-    final db = await _dbHelper.database;
-
-    // 관심종목과 보유종목 조회
-    final activeStocks = await db.rawQuery('''
-      SELECT DISTINCT stock_code FROM (
-        SELECT stock_code FROM watchlist WHERE is_active = 1
-        UNION
-        SELECT stock_code FROM holdings
-      )
-    ''');
-
-    final stockCodes = activeStocks.map((e) => e['stock_code'] as String).toList();
-    
-    if (stockCodes.isEmpty) {
-      return {};
-    }
-
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return {};
+    final watch = await _userCol(uid, 'watchlist').get();
+    final hold = await _userCol(uid, 'holdings').get();
+    final stockCodes = <String>{
+      ...watch.docs.map((d) => (d.data()['stock_code'] ?? d.id) as String),
+      ...hold.docs.map((d) => (d.data()['pdno'] ?? d.id) as String),
+    }.toList();
+    if (stockCodes.isEmpty) return {};
     return await getMultipleCurrentPrice(stockCodes);
   }
 
   /// 특정 시장의 현재가 조회
   Future<List<Map<String, dynamic>>> getCurrentPriceByMarket(String market) async {
-    final db = await _dbHelper.database;
-
-    final result = await db.query(
-      'current_price',
-      where: 'market = ?',
-      whereArgs: [market],
-      orderBy: 'stock_code',
-    );
-
-    return result;
+    final snap = await FirebaseFirestore.instance
+        .collection('prices')
+        .where('market', isEqualTo: market)
+        .get();
+    return snap.docs.map((d) => d.data()).toList();
   }
 
   /// 상승률 기준 정렬된 현재가 조회
@@ -179,25 +127,11 @@ class CurrentPriceRepository {
     int limit = 50,
     bool ascending = false, // false: 상승률 높은 순, true: 하락률 높은 순
   }) async {
-    final db = await _dbHelper.database;
-
-    String whereClause = '1=1';
-    List<dynamic> whereArgs = [];
-
-    if (market != null) {
-      whereClause += ' AND market = ?';
-      whereArgs.add(market);
-    }
-
-    final result = await db.query(
-      'current_price',
-      where: whereClause,
-      whereArgs: whereArgs,
-      orderBy: 'change_rate ${ascending ? 'ASC' : 'DESC'}',
-      limit: limit,
-    );
-
-    return result;
+    Query<Map<String, dynamic>> q = FirebaseFirestore.instance.collection('prices');
+    if (market != null) q = q.where('market', isEqualTo: market);
+    q = q.orderBy('change_rate', descending: !ascending).limit(limit);
+    final snap = await q.get();
+    return snap.docs.map((d) => d.data()).toList();
   }
 
   /// 거래량 기준 정렬된 현재가 조회
@@ -206,206 +140,105 @@ class CurrentPriceRepository {
     int limit = 50,
     bool ascending = false, // false: 거래량 많은 순, true: 거래량 적은 순
   }) async {
-    final db = await _dbHelper.database;
-
-    String whereClause = '1=1';
-    List<dynamic> whereArgs = [];
-
-    if (market != null) {
-      whereClause += ' AND market = ?';
-      whereArgs.add(market);
-    }
-
-    final result = await db.query(
-      'current_price',
-      where: whereClause,
-      whereArgs: whereArgs,
-      orderBy: 'volume ${ascending ? 'ASC' : 'DESC'}',
-      limit: limit,
-    );
-
-    return result;
+    Query<Map<String, dynamic>> q = FirebaseFirestore.instance.collection('prices');
+    if (market != null) q = q.where('market', isEqualTo: market);
+    q = q.orderBy('volume', descending: !ascending).limit(limit);
+    final snap = await q.get();
+    return snap.docs.map((d) => d.data()).toList();
   }
 
   /// 현재가 데이터 존재 여부 확인
   Future<bool> hasCurrentPrice(String stockCode) async {
-    final db = await _dbHelper.database;
-
-    final result = await db.query(
-      'current_price',
-      columns: ['id'],
-      where: 'stock_code = ?',
-      whereArgs: [stockCode],
-      limit: 1,
-    );
-
-    return result.isNotEmpty;
+    final d = await _doc(stockCode).get();
+    return d.exists;
   }
 
   /// 현재가 데이터 삭제 (특정 종목)
   Future<int> deleteCurrentPrice(String stockCode) async {
-    final db = await _dbHelper.database;
-
-    return await db.delete(
-      'current_price',
-      where: 'stock_code = ?',
-      whereArgs: [stockCode],
-    );
+    await _doc(stockCode).delete();
+    return 1;
   }
 
   /// 현재가 데이터 삭제 (특정 시장)
   Future<int> deleteCurrentPriceByMarket(String market) async {
-    final db = await _dbHelper.database;
-
-    return await db.delete(
-      'current_price',
-      where: 'market = ?',
-      whereArgs: [market],
-    );
+    final snap = await FirebaseFirestore.instance.collection('prices').where('market', isEqualTo: market).get();
+    final batch = FirebaseFirestore.instance.batch();
+    for (final d in snap.docs) batch.delete(d.reference);
+    await batch.commit();
+    return snap.docs.length;
   }
 
   /// 오래된 현재가 데이터 정리 (1시간 이상)
   Future<int> cleanupOldCurrentPrice() async {
-    final db = await _dbHelper.database;
     final oneHourAgo = DateTime.now().millisecondsSinceEpoch - (60 * 60 * 1000);
-
-    return await db.delete(
-      'current_price',
-      where: 'timestamp < ?',
-      whereArgs: [oneHourAgo],
-    );
+    final snap = await FirebaseFirestore.instance
+        .collection('prices')
+        .where('timestamp', isLessThan: oneHourAgo)
+        .get();
+    final batch = FirebaseFirestore.instance.batch();
+    for (final d in snap.docs) batch.delete(d.reference);
+    await batch.commit();
+    return snap.docs.length;
   }
 
   /// 비활성 종목의 현재가 데이터 정리
   Future<Map<String, dynamic>> cleanupInactiveStocks(List<String> activeStocks) async {
-    final db = await _dbHelper.database;
-    
     try {
       if (activeStocks.isEmpty) {
-        return {
-          'deleted_records': 0,
-          'active_stocks_count': 0,
-        };
+        return {'deleted_records': 0, 'active_stocks_count': 0};
       }
-      
-      final placeholders = List.filled(activeStocks.length, '?').join(',');
-      final deletedCount = await db.rawDelete('''
-        DELETE FROM current_price 
-        WHERE stock_code NOT IN ($placeholders)
-      ''', activeStocks);
-      
-      return {
-        'deleted_records': deletedCount,
-        'active_stocks_count': activeStocks.length,
-      };
+      final snap = await FirebaseFirestore.instance.collection('prices').get();
+      final toDelete = snap.docs.where((d) => !activeStocks.contains(d.id)).toList();
+      final batch = FirebaseFirestore.instance.batch();
+      for (final d in toDelete) batch.delete(d.reference);
+      await batch.commit();
+      return {'deleted_records': toDelete.length, 'active_stocks_count': activeStocks.length};
     } catch (e) {
       print('❌ 비활성 종목 현재가 데이터 정리 실패: $e');
-      return {
-        'deleted_records': 0,
-        'active_stocks_count': activeStocks.length,
-        'error': e.toString(),
-      };
+      return {'deleted_records': 0, 'active_stocks_count': activeStocks.length, 'error': e.toString()};
     }
   }
 
   /// 오래된 현재가 데이터 정리 (1시간 이상) - Map 반환
   Future<Map<String, dynamic>> cleanupOldCurrentPriceData() async {
-    final db = await _dbHelper.database;
-    
     try {
       final oneHourAgo = DateTime.now().millisecondsSinceEpoch - (60 * 60 * 1000);
-      
-      final deletedCount = await db.delete(
-        'current_price',
-        where: 'timestamp < ?',
-        whereArgs: [oneHourAgo],
-      );
-      
-      return {
-        'deleted_records': deletedCount,
-        'cutoff_timestamp': oneHourAgo,
-      };
+      final snap = await FirebaseFirestore.instance
+          .collection('prices')
+          .where('timestamp', isLessThan: oneHourAgo)
+          .get();
+      final batch = FirebaseFirestore.instance.batch();
+      for (final d in snap.docs) batch.delete(d.reference);
+      await batch.commit();
+      return {'deleted_records': snap.docs.length, 'cutoff_timestamp': oneHourAgo};
     } catch (e) {
       print('❌ 오래된 현재가 데이터 정리 실패: $e');
-      return {
-        'deleted_records': 0,
-        'cutoff_timestamp': 0,
-        'error': e.toString(),
-      };
+      return {'deleted_records': 0, 'cutoff_timestamp': 0, 'error': e.toString()};
     }
   }
 
-  /// 현재가 데이터 통계 조회
+  /// 현재가 데이터 통계 조회 (Firestore)
   Future<Map<String, dynamic>> getCurrentPriceStats() async {
-  
-  /// 거래량 기준 상위 종목 조회
-  Future<List<Map<String, dynamic>>> getCurrentPriceByVolume({
-    String? market,
-    int limit = 50,
-    bool ascending = false,
-  }) async {
-    final db = await _dbHelper.database;
-    
-    String whereClause = '1=1';
-    List<dynamic> whereArgs = [];
-    
-    if (market != null && market.isNotEmpty) {
-      whereClause += ' AND market = ?';
-      whereArgs.add(market);
-    }
-    
-    final orderBy = ascending ? 'volume ASC' : 'volume DESC';
-    
-    final result = await db.query(
-      'current_price',
-      where: whereClause,
-      whereArgs: whereArgs,
-      orderBy: orderBy,
-      limit: limit,
-    );
-    
-    return result;
-  }
-  
-  /// 모든 현재가 데이터 조회
-  Future<List<Map<String, dynamic>>> getAllCurrentPrices() async {
-    final db = await _dbHelper.database;
-    return await db.query('current_price');
-  }
-    final db = await _dbHelper.database;
-
-    final totalCount = await db.rawQuery('SELECT COUNT(*) as count FROM current_price');
-    final uniqueStocks = await db.rawQuery('SELECT COUNT(DISTINCT stock_code) as count FROM current_price');
-    final marketStats = await db.rawQuery('''
-      SELECT market, COUNT(*) as count FROM current_price GROUP BY market
-    ''');
-
+    final snap = await FirebaseFirestore.instance.collection('prices').get();
     return {
-      'total_records': totalCount.first['count'] as int,
-      'unique_stocks': uniqueStocks.first['count'] as int,
-      'market_stats': marketStats,
+      'total_records': snap.docs.length,
+      'unique_stocks': snap.docs.length,
     };
   }
 
-  /// 특정 종목의 현재가 통계
+  /// 모든 현재가 데이터 조회 (Firestore)
+  Future<List<Map<String, dynamic>>> getAllCurrentPrices() async {
+    final snap = await FirebaseFirestore.instance.collection('prices').get();
+    return snap.docs.map((d) => d.data()).toList();
+  }
+
+  /// 특정 종목의 현재가 통계 (Firestore)
   Future<Map<String, dynamic>> getStockCurrentPriceStats(String stockCode) async {
-    final db = await _dbHelper.database;
-
-    final result = await db.query(
-      'current_price',
-      where: 'stock_code = ?',
-      whereArgs: [stockCode],
-      limit: 1,
-    );
-
-    if (result.isEmpty) {
-      return {
-        'stock_code': stockCode,
-        'has_data': false,
-      };
+    final doc = await _doc(stockCode).get();
+    if (!doc.exists) {
+      return {'stock_code': stockCode, 'has_data': false};
     }
-
-    final data = result.first;
+    final data = doc.data()!;
     return {
       'stock_code': stockCode,
       'has_data': true,
@@ -416,199 +249,85 @@ class CurrentPriceRepository {
     };
   }
 
-  /// 현재가 데이터 백업 (JSON 형식)
-  Future<Map<String, dynamic>> exportCurrentPrice({
-    List<String>? stockCodes,
-    String? market,
-  }) async {
-    final db = await _dbHelper.database;
-
-    String whereClause = '1=1';
-    List<dynamic> whereArgs = [];
-
+  /// 현재가 데이터 백업/복원/검증 (Firestore)
+  Future<Map<String, dynamic>> exportCurrentPrice({ List<String>? stockCodes, String? market }) async {
+    Query<Map<String, dynamic>> q = FirebaseFirestore.instance.collection('prices');
     if (stockCodes != null && stockCodes.isNotEmpty) {
-      final placeholders = List.filled(stockCodes.length, '?').join(',');
-      whereClause += ' AND stock_code IN ($placeholders)';
-      whereArgs.addAll(stockCodes);
+      final list = <Map<String, dynamic>>[];
+      for (final code in stockCodes) {
+        final d = await _doc(code).get();
+        if (d.exists) list.add(d.data()!);
+      }
+      return {'export_date': DateTime.now().toIso8601String(), 'data_count': list.length, 'current_price_data': list};
     }
-
-    if (market != null) {
-      whereClause += ' AND market = ?';
-      whereArgs.add(market);
-    }
-
-    final result = await db.query(
-      'current_price',
-      where: whereClause,
-      whereArgs: whereArgs,
-      orderBy: 'stock_code',
-    );
-
+    if (market != null) q = q.where('market', isEqualTo: market);
+    final snap = await q.get();
     return {
       'export_date': DateTime.now().toIso8601String(),
-      'data_count': result.length,
-      'current_price_data': result,
+      'data_count': snap.docs.length,
+      'current_price_data': snap.docs.map((d) => d.data()).toList(),
     };
   }
 
-  /// 현재가 데이터 복원 (JSON 형식)
   Future<void> importCurrentPrice(Map<String, dynamic> exportData) async {
-    final priceDataList = exportData['current_price_data'] as List<dynamic>;
-    
-    if (priceDataList.isEmpty) {
-      return;
+    final list = (exportData['current_price_data'] as List?) ?? [];
+    if (list.isEmpty) return;
+    final batch = FirebaseFirestore.instance.batch();
+    for (final e in list) {
+      final m = Map<String, dynamic>.from(e as Map);
+      final code = (m['stock_code'] ?? '').toString();
+      if (code.isEmpty) continue;
+      batch.set(_doc(code), m, SetOptions(merge: true));
     }
-
-    final db = await _dbHelper.database;
-    final now = DateTime.now().millisecondsSinceEpoch;
-
-    await db.transaction((txn) async {
-      for (final data in priceDataList) {
-        final priceData = data as Map<String, dynamic>;
-        await txn.insert(
-          'current_price',
-          {
-            'stock_code': priceData['stock_code'],
-            'market': priceData['market'],
-            'current_price': priceData['current_price'],
-            'prev_close': priceData['prev_close'],
-            'change_amount': priceData['change_amount'],
-            'change_rate': priceData['change_rate'],
-            'volume': priceData['volume'],
-            'trade_amount': priceData['trade_amount'],
-            'high_price': priceData['high_price'],
-            'low_price': priceData['low_price'],
-            'open_price': priceData['open_price'],
-            'market_cap': priceData['market_cap'],
-            'per': priceData['per'],
-            'pbr': priceData['pbr'],
-            'timestamp': now,
-          },
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
-      }
-    });
+    await batch.commit();
   }
 
-  /// 현재가 데이터 검증 (유효성 검사)
   Future<List<String>> validateCurrentPriceData() async {
-    final db = await _dbHelper.database;
     final errors = <String>[];
-
-    // 1. 필수 필드 검증
-    final invalidData = await db.rawQuery('''
-      SELECT stock_code FROM current_price 
-      WHERE current_price IS NULL OR prev_close IS NULL OR volume IS NULL
-    ''');
-
-    for (final row in invalidData) {
-      errors.add('${row['stock_code']}: 필수 필드 누락');
+    final snap = await FirebaseFirestore.instance.collection('prices').get();
+    for (final d in snap.docs) {
+      final m = d.data();
+      if (m['current_price'] == null || m['prev_close'] == null || m['volume'] == null) {
+        errors.add('${d.id}: 필수 필드 누락');
+      }
     }
-
-    // 2. 가격 유효성 검증 (음수 가격)
-    final negativePrice = await db.rawQuery('''
-      SELECT stock_code FROM current_price 
-      WHERE current_price < 0 OR prev_close < 0 OR high_price < 0 OR low_price < 0 OR open_price < 0
-    ''');
-
-    for (final row in negativePrice) {
-      errors.add('${row['stock_code']}: 음수 가격 발견');
-    }
-
-    // 3. 거래량 유효성 검증 (음수 거래량)
-    final negativeVolume = await db.rawQuery('''
-      SELECT stock_code FROM current_price 
-      WHERE volume < 0
-    ''');
-
-    for (final row in negativeVolume) {
-      errors.add('${row['stock_code']}: 음수 거래량 발견');
-    }
-
     return errors;
   }
 
-  /// 모든 현재가 데이터 조회
-  Future<List<Map<String, dynamic>>> getAllCurrentPrices() async {
-    final db = await _dbHelper.database;
-    
-    try {
-      final result = await db.query(
-        'current_price',
-        orderBy: 'stock_code',
-      );
-      
-      return result;
-    } catch (e) {
-      print('❌ 모든 현재가 데이터 조회 실패: $e');
-      return [];
-    }
-  }
-
-  /// 활성 종목의 현재가 데이터 조회 (메모리 최적화)
+  /// 활성 종목 현재가 조회(Firestore). whereIn 제약으로 10개씩 청크 처리
   Future<List<Map<String, dynamic>>> getActiveStocksCurrentPrices({int limit = 500}) async {
-    final db = await _dbHelper.database;
-    
-    try {
-      // 메모리 부족 방지를 위해 LIMIT 절 추가 및 필요한 컬럼만 SELECT
-      final result = await db.rawQuery('''
-        SELECT cp.stock_code, cp.market, cp.current_price, cp.change_rate, cp.volume, cp.timestamp
-        FROM current_price cp
-        WHERE cp.stock_code IN (
-          SELECT stock_code FROM watchlist WHERE is_active = 1
-          UNION
-          SELECT stock_code FROM holdings
-        )
-        ORDER BY cp.timestamp DESC
-        LIMIT ?
-      ''', [limit]);
-      
-      return result;
-    } catch (e) {
-      print('❌ 활성 종목 현재가 데이터 조회 실패: $e');
-      return [];
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return [];
+    final watch = await _userCol(uid, 'watchlist').get();
+    final hold = await _userCol(uid, 'holdings').get();
+    final codes = <String>{
+      ...watch.docs.map((d) => (d.data()['stock_code'] ?? d.id) as String),
+      ...hold.docs.map((d) => (d.data()['pdno'] ?? d.id) as String),
+    }.toList();
+    if (codes.isEmpty) return [];
+
+    final results = <Map<String, dynamic>>[];
+    for (int i = 0; i < codes.length; i += 10) {
+      final chunk = codes.sublist(i, i + 10 > codes.length ? codes.length : i + 10);
+      final snap = await FirebaseFirestore.instance
+          .collection('prices')
+          .where(FieldPath.documentId, whereIn: chunk)
+          .get();
+      results.addAll(snap.docs.map((d) => d.data()));
+      if (results.length >= limit) break;
     }
+
+    results.sort((a, b) => ((b['timestamp'] ?? 0) as int).compareTo((a['timestamp'] ?? 0) as int));
+    if (results.length > limit) {
+      return results.sublist(0, limit);
+    }
+    return results;
   }
 
-  /// 통계 정보 조회
+  /// 통계 정보(Firestore) - 간단 집계
   Future<Map<String, dynamic>> getStats() async {
-    final db = await _dbHelper.database;
-    
-    try {
-      // 전체 레코드 수
-      final totalCount = Sqflite.firstIntValue(
-        await db.rawQuery('SELECT COUNT(*) FROM current_price')
-      ) ?? 0;
-      
-      // 종목별 레코드 수
-      final stockCount = Sqflite.firstIntValue(
-        await db.rawQuery('SELECT COUNT(DISTINCT stock_code) FROM current_price')
-      ) ?? 0;
-      
-      // 최신 데이터 시간
-      final latestTimestamp = Sqflite.firstIntValue(
-        await db.rawQuery('SELECT MAX(timestamp) FROM current_price')
-      ) ?? 0;
-      
-      // 오래된 데이터 시간
-      final oldestTimestamp = Sqflite.firstIntValue(
-        await db.rawQuery('SELECT MIN(timestamp) FROM current_price')
-      ) ?? 0;
-      
-      // 평균 가격
-      final avgPriceResult = await db.rawQuery('SELECT AVG(current_price) FROM current_price WHERE current_price > 0');
-      final avgPrice = avgPriceResult.isNotEmpty ? avgPriceResult.first['AVG(current_price)'] as double? ?? 0.0 : 0.0;
-      
-      return {
-        'total_records': totalCount,
-        'unique_stocks': stockCount,
-        'latest_timestamp': latestTimestamp,
-        'oldest_timestamp': oldestTimestamp,
-        'avg_price': avgPrice.toStringAsFixed(2),
-        'avg_records_per_stock': stockCount > 0 ? (totalCount / stockCount).toStringAsFixed(2) : '0',
-      };
-    } catch (e) {
-      print('❌ 현재가 데이터 통계 조회 실패: $e');
+    final snap = await FirebaseFirestore.instance.collection('prices').get();
+    if (snap.docs.isEmpty) {
       return {
         'total_records': 0,
         'unique_stocks': 0,
@@ -616,8 +335,33 @@ class CurrentPriceRepository {
         'oldest_timestamp': 0,
         'avg_price': '0.00',
         'avg_records_per_stock': '0',
-        'error': e.toString(),
       };
     }
+    int latest = 0;
+    int oldest = 1 << 62;
+    double sumPrice = 0.0;
+    int countPrice = 0;
+    for (final d in snap.docs) {
+      final m = d.data();
+      final ts = (m['timestamp'] as int?) ?? 0;
+      if (ts > latest) latest = ts;
+      if (ts < oldest) oldest = ts;
+      final cp = (m['current_price'] as num?)?.toDouble();
+      if (cp != null && cp > 0) {
+        sumPrice += cp;
+        countPrice += 1;
+      }
+    }
+    final total = snap.docs.length;
+    final unique = total; // 종목당 1 문서 가정
+    final avg = countPrice > 0 ? (sumPrice / countPrice) : 0.0;
+    return {
+      'total_records': total,
+      'unique_stocks': unique,
+      'latest_timestamp': latest,
+      'oldest_timestamp': oldest == (1 << 62) ? 0 : oldest,
+      'avg_price': avg.toStringAsFixed(2),
+      'avg_records_per_stock': unique > 0 ? (total / unique).toStringAsFixed(2) : '0',
+    };
   }
 }

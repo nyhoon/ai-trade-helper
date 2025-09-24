@@ -1,7 +1,6 @@
-import 'package:sqflite/sqflite.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../../constants/chart_constants.dart';
-import '../database_helper.dart';
-import 'chart_data_repository.dart';
 
 /// 일별 히스토리 데이터 Repository (100일 관리) - 새로운 chart_data 테이블 사용
 /// 
@@ -10,8 +9,10 @@ import 'chart_data_repository.dart';
 /// - 200일 보관 → 100일 보관으로 변경
 /// - 새로운 ChartDataRepository 활용
 class HistoricalDataRepository {
-  final DatabaseHelper _dbHelper = DatabaseHelper.instance;
-  final ChartDataRepository _chartRepo = ChartDataRepository();
+  CollectionReference<Map<String, dynamic>> _collection(String stockCode) =>
+      FirebaseFirestore.instance.collection('charts').doc(stockCode).collection('daily');
+  String _formatDate(DateTime d) => '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+  int _dateInt(String yyyyMmDd) => int.parse(yyyyMmDd.replaceAll('-', ''));
 
   /// 일별 차트 데이터 저장 (새로운 chart_data 테이블 사용)
   Future<void> upsertDailyBars({
@@ -23,22 +24,35 @@ class HistoricalDataRepository {
     if (bars.isEmpty) return;
 
     try {
-      // 새로운 ChartDataRepository 사용
-      final formattedData = bars.map((b) => {
-        'stock_code': stockCode,
-        'market': market,
-        'date': b['date'], // yyyy-MM-dd 형식
-        'open': (b['open'] ?? 0.0).toDouble(),
-        'high': (b['high'] ?? 0.0).toDouble(),
-        'low': (b['low'] ?? 0.0).toDouble(),
-        'close': (b['close'] ?? 0.0).toDouble(),
-        'volume': (b['volume'] ?? 0).toInt(),
-        'trade_amount': b['trade_amount'],
-      }).toList();
+      final batch = FirebaseFirestore.instance.batch();
+      for (final b in bars) {
+        final date = (b['date'] as String?) ?? _formatDate(DateTime.now());
+        final doc = _collection(stockCode).doc(date);
+        batch.set(doc, {
+          'stock_code': stockCode,
+          'market': market,
+          'date': date,
+          'date_ts': _dateInt(date),
+          'open': (b['open'] ?? 0.0).toDouble(),
+          'high': (b['high'] ?? 0.0).toDouble(),
+          'low': (b['low'] ?? 0.0).toDouble(),
+          'close': (b['close'] ?? 0.0).toDouble(),
+          'volume': (b['volume'] ?? 0).toInt(),
+          'trade_amount': (b['trade_amount'] as num?)?.toDouble(),
+          'updated_at': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+      await batch.commit();
 
-      await _chartRepo.insertMultipleChartData(formattedData);
-      
-      print('📊 $stockCode: ${formattedData.length}일 차트 데이터 저장 완료');
+      // 보존 정책: 오래된 문서 삭제
+      final snap = await _collection(stockCode).orderBy('date_ts', descending: true).get();
+      if (snap.docs.length > keepDays) {
+        final toDelete = snap.docs.skip(keepDays).toList();
+        final delBatch = FirebaseFirestore.instance.batch();
+        for (final d in toDelete) delBatch.delete(d.reference);
+        await delBatch.commit();
+      }
+      print('📊 $stockCode: ${bars.length}일 차트 데이터 Firestore 저장 완료');
     } catch (e) {
       print('❌ $stockCode 차트 데이터 저장 실패: $e');
       rethrow;
@@ -48,8 +62,9 @@ class HistoricalDataRepository {
   /// 최근 차트 데이터 조회 (새로운 chart_data 테이블 사용)
   Future<List<Map<String, dynamic>>> getRecentBars(String stockCode, {int limit = ChartConstants.CHART_MIN_BARS}) async {
     try {
-      final rows = await _chartRepo.getChartData(stockCode, limit: limit);
-      print('📊 [ChartData] $stockCode 최근 ${rows.length}개 조회 (요청: $limit)');
+      final snap = await _collection(stockCode).orderBy('date_ts', descending: true).limit(limit).get();
+      final rows = snap.docs.map((d) => d.data()).toList();
+      print('📊 [ChartData] $stockCode 최근 ${rows.length}개 조회(Firestore) (요청: $limit)');
       return rows;
     } catch (e) {
       print('❌ $stockCode 최근 차트 데이터 조회 실패: $e');
@@ -60,8 +75,11 @@ class HistoricalDataRepository {
   /// 특정 종목의 차트 데이터 삭제
   Future<void> deleteByStockCode(String stockCode) async {
     try {
-      await _chartRepo.deleteChartData(stockCode);
-      print('🗑️ $stockCode 차트 데이터 삭제 완료');
+      final snap = await _collection(stockCode).get();
+      final batch = FirebaseFirestore.instance.batch();
+      for (final d in snap.docs) batch.delete(d.reference);
+      await batch.commit();
+      print('🗑️ $stockCode 차트 데이터 삭제 완료(Firestore)');
     } catch (e) {
       print('❌ $stockCode 차트 데이터 삭제 실패: $e');
       rethrow;
@@ -75,14 +93,14 @@ class HistoricalDataRepository {
     required DateTime endDate,
   }) async {
     try {
-      final startDateStr = '${startDate.year}-${startDate.month.toString().padLeft(2, '0')}-${startDate.day.toString().padLeft(2, '0')}';
-      final endDateStr = '${endDate.year}-${endDate.month.toString().padLeft(2, '0')}-${endDate.day.toString().padLeft(2, '0')}';
-      
-      return await _chartRepo.getChartData(
-        stockCode,
-        startDate: startDateStr,
-        endDate: endDateStr,
-      );
+      final startTs = _dateInt(_formatDate(startDate));
+      final endTs = _dateInt(_formatDate(endDate));
+      final snap = await _collection(stockCode)
+          .where('date_ts', isGreaterThanOrEqualTo: startTs)
+          .where('date_ts', isLessThanOrEqualTo: endTs)
+          .orderBy('date_ts')
+          .get();
+      return snap.docs.map((d) => d.data()).toList();
     } catch (e) {
       print('❌ $stockCode 날짜 범위 차트 데이터 조회 실패: $e');
       return [];
@@ -92,12 +110,15 @@ class HistoricalDataRepository {
   /// 특정 날짜 이전의 오래된 데이터 삭제 (100일 보관 정책)
   Future<void> deleteOldData({required DateTime before}) async {
     try {
-      final cutoffDateStr = '${before.year}-${before.month.toString().padLeft(2, '0')}-${before.day.toString().padLeft(2, '0')}';
-      
-      // 100일 이전 데이터 삭제
-      final deletedCount = await _chartRepo.deleteChartDataByDateRange('1900-01-01', cutoffDateStr);
-      
-      print('🗑️ 오래된 차트 데이터 삭제 완료: $deletedCount개');
+      final cutoffTs = _dateInt(_formatDate(before));
+      final snap = await FirebaseFirestore.instance
+          .collectionGroup('daily')
+          .where('date_ts', isLessThan: cutoffTs)
+          .get();
+      final batch = FirebaseFirestore.instance.batch();
+      for (final d in snap.docs) batch.delete(d.reference);
+      await batch.commit();
+      print('🗑️ 오래된 차트 데이터 삭제 완료(Firestore): ${snap.docs.length}개');
     } catch (e) {
       print('❌ 오래된 차트 데이터 삭제 실패: $e');
       rethrow;
@@ -107,10 +128,8 @@ class HistoricalDataRepository {
   /// 최신 날짜 조회
   Future<String?> getLatestDate(String stockCode) async {
     try {
-      final latestData = await _chartRepo.getChartData(stockCode, limit: 1);
-      if (latestData.isNotEmpty) {
-        return latestData.first['date'] as String?;
-      }
+      final snap = await _collection(stockCode).orderBy('date_ts', descending: true).limit(1).get();
+      if (snap.docs.isNotEmpty) return snap.docs.first.data()['date'] as String?;
       return null;
     } catch (e) {
       print('❌ $stockCode 최신 날짜 조회 실패: $e');
@@ -121,7 +140,8 @@ class HistoricalDataRepository {
   /// 차트 데이터 통계 조회
   Future<Map<String, dynamic>> getChartDataStats() async {
     try {
-      return await _chartRepo.getChartDataStats();
+      // 간단 카운트: charts/*/daily 문서 수 집계는 비용 큼 → 빈 객체 반환 또는 필요 시 서버 집계로 이전
+      return {};
     } catch (e) {
       print('❌ 차트 데이터 통계 조회 실패: $e');
       return {};
@@ -131,7 +151,10 @@ class HistoricalDataRepository {
   /// 특정 종목의 차트 데이터 통계
   Future<Map<String, dynamic>> getStockChartDataStats(String stockCode) async {
     try {
-      return await _chartRepo.getStockChartDataStats(stockCode);
+      final snap = await _collection(stockCode).get();
+      return {
+        'count': snap.docs.length,
+      };
     } catch (e) {
       print('❌ $stockCode 차트 데이터 통계 조회 실패: $e');
       return {};
@@ -141,7 +164,8 @@ class HistoricalDataRepository {
   /// 비활성 종목의 차트 데이터 정리
   Future<int> cleanupInactiveChartData() async {
     try {
-      return await _chartRepo.cleanupInactiveChartData();
+      // Firestore에서는 비활성 종목 정의 필요. 현재는 미사용.
+      return 0;
     } catch (e) {
       print('❌ 비활성 종목 차트 데이터 정리 실패: $e');
       return 0;
@@ -155,11 +179,14 @@ class HistoricalDataRepository {
     String? endDate,
   }) async {
     try {
-      return await _chartRepo.exportChartData(
-        stockCodes: stockCodes,
-        startDate: startDate,
-        endDate: endDate,
-      );
+      // 간단 export: 각 심볼의 최근 bars를 모아 반환
+      final result = <String, dynamic>{};
+      final targets = stockCodes ?? [];
+      for (final code in targets) {
+        final snap = await _collection(code).get();
+        result[code] = snap.docs.map((d) => d.data()).toList();
+      }
+      return result;
     } catch (e) {
       print('❌ 차트 데이터 백업 실패: $e');
       return {};
@@ -169,8 +196,19 @@ class HistoricalDataRepository {
   /// 차트 데이터 복원
   Future<void> importChartData(Map<String, dynamic> exportData) async {
     try {
-      await _chartRepo.importChartData(exportData);
-      print('✅ 차트 데이터 복원 완료');
+      final batch = FirebaseFirestore.instance.batch();
+      for (final entry in exportData.entries) {
+        final code = entry.key;
+        final List list = entry.value as List? ?? [];
+        for (final item in list) {
+          final m = Map<String, dynamic>.from(item as Map);
+          final date = (m['date'] as String?) ?? '';
+          if (date.isEmpty) continue;
+          batch.set(_collection(code).doc(date), m, SetOptions(merge: true));
+        }
+      }
+      await batch.commit();
+      print('✅ 차트 데이터 복원 완료(Firestore)');
     } catch (e) {
       print('❌ 차트 데이터 복원 실패: $e');
       rethrow;
