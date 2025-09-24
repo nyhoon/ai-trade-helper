@@ -309,15 +309,7 @@ class UnifiedStockDataManager {
       }
 
       // 기존 UnifiedAnalysisService에서 분석 결과 가져오기
-      final analysisResult = await _unifiedAnalysis.analyzeStock(
-        stockCode,
-        currentPrice: _toDouble(currentPriceData['prpr']),
-        prevClose: _toDouble(currentPriceData['stck_prdy_clpr']),
-        volume: _toDouble(currentPriceData['acml_vol']),
-        highPrice: _toDouble(currentPriceData['high']),
-        lowPrice: _toDouble(currentPriceData['low']),
-        openPrice: _toDouble(currentPriceData['open']),
-      );
+      final analysisResult = await _unifiedAnalysis.analyzeStock(stockCode, days: 100);
 
       if (analysisResult != null) {
         // 캐시에 저장

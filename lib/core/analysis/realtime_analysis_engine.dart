@@ -1,3 +1,7 @@
+// NOTE: 서버 전환 이후 이 엔진은 더 이상 사용하지 않습니다.
+// 분석 점수는 Firebase Functions(onCall)에서 계산하여 반환합니다.
+// 남은 참조가 있다면 `AnalysisFunctionsService`로 대체하세요.
+
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../database/repositories/historical_data_repository.dart';

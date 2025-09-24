@@ -669,7 +669,9 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
           final market = stock['market']?.toString() ?? 'UNKNOWN';
           
           final progress = 0.65 + (0.15 * i / essentialStocks.length);
-          await _animateTo(progress, '${i + 1}/${essentialStocks.length} 처리 중...');
+          final typeLabel = (stock['type'] ?? '').toString();
+          final label = typeLabel == 'holdings' || typeLabel == 'both' ? '보유종목' : '관심종목';
+          await _animateTo(progress, '$label ${i + 1}/${essentialStocks.length} 처리 중...');
           
           try {
             print('📊 $stockCode ($stockName) 현재가 데이터만 로딩...');
@@ -847,7 +849,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
         // 통일 API 사용 (여러 거래소 자동 시도)
         final rawData = await unifiedApiService.getDailyChart(
           stockCode,
-          count: 80,
+          count: 100,
         );
         
         print('🔍 [$stockCode] API 호출 결과:');
@@ -884,7 +886,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
         // @api/ 확장 파일의 메서드 사용
         final rawData = await unifiedApiService.getDomesticDailyChart(
           stockCode: stockCode,
-          count: 80,
+          count: 100,
         );
         
         // 국내주식 데이터: 표준 키 또는 stck_* 키를 처리하고 날짜를 YYYYMMDD로 통일

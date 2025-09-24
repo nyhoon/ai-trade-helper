@@ -12,8 +12,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import '../../core/api/kis_unified_api_service.dart';
-import '../../core/analysis/unified_analysis_service.dart';
-import '../../core/analysis/technical_indicators.dart';
+import '../../core/remote/analysis_functions_service.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../../core/data/app_data_manager.dart';
 import '../../core/data/unified_stock_data_manager.dart';
 import '../../core/trading/investment_style_manager.dart';
@@ -30,6 +30,7 @@ import '../../core/trading/style_based_trading_service.dart';
 import '../../core/services/signal_tracker.dart';
 import '../../core/services/trade_status_tracker.dart' show TradeStatusTracker, TradeStatus;
 import '../../core/services/local_notification_manager.dart';
+import '../../core/analysis/unified_analysis_service.dart';
 import '../../core/database/repositories/notification_history_repository.dart';
 import '../../core/trading/market_time_validator.dart';
 import '../../core/database/database_helper.dart';
@@ -56,6 +57,7 @@ import 'utils/analysis_formatters.dart';
 import 'widgets/investment_style_info.dart';
 import 'widgets/no_api_message.dart';
 import 'widgets/analysis_item.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class AnalysisScreen extends StatefulWidget {
   const AnalysisScreen({super.key});
@@ -67,6 +69,7 @@ class AnalysisScreen extends StatefulWidget {
 class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStateMixin {
   // KisApiService 제거됨 - KisUnifiedApiService 사용
   final KisUnifiedApiService _unifiedApiService = KisUnifiedApiService();
+  final AnalysisFunctionsService _analysisFunctionsService = AnalysisFunctionsService();
   final UnifiedAnalysisService _unifiedAnalysis = UnifiedAnalysisService.instance;
   final InvestmentStyleManager _styleManager = InvestmentStyleManager();
   final UnifiedStockDataManager _unifiedDataManager = UnifiedStockDataManager.instance;
@@ -412,16 +415,30 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
   /// 관심종목 데이터 새로고침
   Future<void> _refreshWatchlistData() async {
     try {
-      // 관심종목 데이터 새로고침 로직
-      // AppDataManager에서 직접 관심종목 데이터 가져오기
-      final watchlist = await AppDataManager.instance.getWatchlist();
-      if (mounted) {
-        setState(() {
-          _watchlistItems = watchlist;
-        });
-      }
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+      final results = await AnalysisFunctionsService().analyzeWatchlist(uid: uid, days: 100);
+      // 서버 결과를 화면 아이템 포맷으로 매핑
+      _watchlistItems = results
+          .map((r) => {
+                'stock_code': r['symbol'] ?? r['id'],
+                'analysis': r,
+                'comprehensiveScore': r['comprehensiveScore'],
+              })
+          .toList();
+      _watchlistItems.sort((a, b) {
+        final sa = (a['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
+        final sb = (b['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
+        return sb.compareTo(sa);
+      });
+      setState(() {});
     } catch (e) {
-      print('❌ 관심종목 새로고침 실패: $e');
+      // 캐시 로드 실패 시 일반 로드로 폴백
+      try {
+        await _loadWatchlist();
+        await _loadHoldings();
+      } catch (fallbackError) {
+        
+      }
     }
   }
 
@@ -482,16 +499,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
           }
 
           // 3. UnifiedAnalysisService를 통해 분석 (추천종목과 동일한 로직)
-          final analysisResult = await _unifiedAnalysis.analyzeStock(
-            code,
-            currentPrice: _toDouble(currentPriceData['prpr']),
-            prevClose: _toDouble(currentPriceData['stck_prdy_clpr']),
-            volume: _toDouble(currentPriceData['acml_vol']),
-            highPrice: _toDouble(currentPriceData['high']),
-            lowPrice: _toDouble(currentPriceData['low']),
-            openPrice: _toDouble(currentPriceData['open']),
-            investmentStyle: _currentStyle,
-          );
+          final analysisResult = await _unifiedAnalysis.analyzeStock(code, days: 100);
           
           if (analysisResult != null) {
             final score = analysisResult['comprehensiveScore'] ?? 0.0;
@@ -678,293 +686,53 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
   Future<void> _loadWatchlist() async {
     print('📋 _loadWatchlist() 함수 시작 (캐시 무시)');
     try {
-      // 캐시 무효화
-      AppDataManager.instance.invalidateCache();
-      UnifiedStockDataManager.instance.clearCache();
-      
-      // AppDataManager의 WatchlistRepository 인스턴스 사용
-      final watchlistRepository = AppDataManager.instance.watchlistRepository;
-      // market 정보를 포함한 상세 정보로 로드
-      final watchlistData = await watchlistRepository.getWatchlistWithStockInfo();
-      
-      _watchlistItems = watchlistData.map((item) => {
-        'stock_code': item['stock_code'],
-        'stock_name': item['stock_name'],
-        'market': item['market'] ?? 'UNKNOWN',
-        'added_at': item['added_at'],
-        'memo': item['memo'],
-      }).toList();
-      
-      print('📋 관심종목 로드 완료: ${_watchlistItems.length}개');
-      
-      // 나스닥 종목 확인
-      print('🔍 나스닥 종목 확인 시작...');
-      print('📋 전체 관심종목: ${_watchlistItems.length}개');
-      
-      for (final item in _watchlistItems) {
-        final stockCode = item['stock_code'] as String? ?? '';
-        final stockName = item['stock_name'] as String? ?? '';
-        final market = item['market'] as String? ?? '';
-        final isNasdaq = _isNasdaqStock(stockCode);
-        print('  - $stockCode ($stockName): market=$market, isNasdaq=$isNasdaq');
-      }
-      
-      final nasdaqItems = _watchlistItems.where((item) => 
-        _isNasdaqStock(item['stock_code'])).toList();
-      print('🇺🇸 나스닥 종목 개수: ${nasdaqItems.length}개');
-      
-      for (final item in nasdaqItems) {
-        print('  - ${item['stock_name']} (${item['stock_code']})');
-      }
-      
-      // 국내 종목 확인
-      final domesticItems = _watchlistItems.where((item) => 
-        !_isNasdaqStock(item['stock_code'])).toList();
-      print('🇰🇷 국내 종목 개수: ${domesticItems.length}개');
-      
-      for (final item in domesticItems) {
-        print('  - ${item['stock_name']} (${item['stock_code']})');
-      }
-      
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+      final results = await AnalysisFunctionsService().analyzeWatchlist(uid: uid, days: 100);
+      _watchlistItems = results
+          .map((r) => {
+                'stock_code': r['symbol'] ?? r['id'],
+                'analysis': r,
+                'comprehensiveScore': r['comprehensiveScore'],
+              })
+          .toList();
+      _watchlistItems.sort((a, b) {
+        final sa = (a['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
+        final sb = (b['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
+        return sb.compareTo(sa);
+      });
+      setState(() {});
     } catch (e) {
-      print('❌ 관심종목 로드 실패: $e');
+      print('❌ _loadWatchlist 실패: $e');
       _watchlistItems = [];
     }
     print('📋 _loadWatchlist() 함수 종료');
   }
   /// 보유종목 로드 (국내 + 해외 완전 로드 후 화면 업데이트)
   Future<void> _loadHoldings() async {
-    print('💼 _loadHoldings() 함수 시작');
+    print('💼 _loadHoldings() 서버 호출 시작');
     try {
-      print('🔍 보유종목 완전 로드 시작...');
-      
-      // 1. KIS API 서비스 확인
-      print('🔧 KIS API 서비스 상태: ${KisUnifiedApiService().isAuthenticated}');
-      
-      // API 설정 확인
-      final apiConfig = KisUnifiedApiService().apiConfig;
-      print('🔧 API 설정: $apiConfig');
-      
-      // API 설정이 유효하지 않은 경우에도 시도해보기
-      if (!apiConfig['isValid']) {
-        print('⚠️ API 설정이 유효하지 않지만 보유종목 조회를 시도합니다.');
-        
-        // API 재인증 시도
-        try {
-          await KisUnifiedApiService().initialize(
-            appKey: ApiConfig.instance.appKey!,
-            appSecret: ApiConfig.instance.appSecret!,
-            accountNumber: ApiConfig.instance.accountNo!,
-          );
-          print('✅ API 재인증 성공');
-        } catch (e) {
-          print('❌ API 재인증 실패: $e');
-          if (mounted) {
-            setState(() {
-              _holdingsItems = [];
-            });
-          }
-          print('✅ API 설정 없음 - 빈 보유종목 설정');
-          return;
-        }
-      }
-      
-      // 2. 거래/계좌탭과 동일한 방식으로 통합 보유종목 단일 조회
-      print('📥 통합 보유종목 단일 조회 시작 (getUnifiedAccountBalance)');
-      // 거래/계좌탭과 동일한 인증 컨텍스트 보장
-      try {
-        await KisUnifiedApiService().initialize(
-          appKey: ApiConfig.instance.appKey!,
-          appSecret: ApiConfig.instance.appSecret!,
-          accountNumber: ApiConfig.instance.accountNo!,
-        );
-        print('✅ KIS 인증 컨텍스트 보장 완료');
-      } catch (e) {
-        print('⚠️ KIS 인증 컨텍스트 보장 실패: $e');
-      }
-      AppDataManager.instance.invalidateCache();
-      UnifiedStockDataManager.instance.clearCache();
-      final cano = _unifiedApiService.extractCano();
-      final acntPrdtCd = _unifiedApiService.extractPrdtCd();
-      final unified = await _unifiedApiService.getUnifiedAccountBalance(cano: cano, acntPrdtCd: acntPrdtCd);
-      final List<Map<String, dynamic>> allHoldingsRaw = <Map<String, dynamic>>[];
-      if (unified != null) {
-        final domesticHoldings = (unified['domesticHoldings'] as List?)?.cast<Map<String, dynamic>>() ?? const [];
-        final overseasHoldings = (unified['overseasHoldings'] as List?)?.cast<Map<String, dynamic>>() ?? const [];
-        allHoldingsRaw..addAll(domesticHoldings)..addAll(overseasHoldings);
-        print('✅ 통합 보유종목 로드 완료: 국내=${domesticHoldings.length}, 해외=${overseasHoldings.length}, 합계=${allHoldingsRaw.length}');
-      } else {
-        print('❌ 통합 보유종목 로드 실패: unified=null');
-      }
-
-      // 정규화: API 필드명을 화면 표시에 필요한 최소 키로 매핑 (추가 필터/보정 없음)
-      print('🔧 보유종목 데이터 정규화 시작... (총 ${allHoldingsRaw.length}개)');
-      final List<Map<String, dynamic>> allHoldings = allHoldingsRaw
-          .map((item) {
-            final String stockCode = (
-              item['stockCode'] ??
-              item['stock_code'] ??
-              item['pdno'] ??
-              item['ovrs_pdno'] ??
-              item['symbol'] ??
-              item['symb'] ??
-              item['ITEM_CD'] ??
-              ''
-            ).toString();
-            final String stockName = (
-              item['stockName'] ??
-              item['stock_name'] ??
-              item['prdt_name'] ??
-              item['ovrs_item_name'] ??
-              item['name'] ??
-              item['ITEM_NM'] ??
-              ''
-            ).toString();
-            // 해외 거래소 코드 보존 (차트 조회 보완용)
-            final String excgRaw = (
-              item['excg'] ?? item['ovrs_excg_cd'] ?? ''
-            ).toString();
-            String exchangeCode = '';
-            String marketLabel = '';
-            if (excgRaw.isNotEmpty) {
-              switch (excgRaw) {
-                case 'NASD':
-                case 'NAS':
-                  exchangeCode = 'NAS';
-                  marketLabel = 'NASDAQ';
-                  break;
-                case 'NYSE':
-                case 'NYS':
-                  exchangeCode = 'NYS';
-                  marketLabel = 'NYSE';
-                  break;
-                case 'AMEX':
-                case 'AMS':
-                  exchangeCode = 'AMS';
-                  marketLabel = 'AMEX';
-                  break;
-                default:
-                  exchangeCode = '';
-                  marketLabel = '';
-              }
-            }
-            
-            // 안전한 타입 변환 (문자열도 숫자로 변환 가능하도록)
-            int quantity = 0;
-            try {
-              final qtyValue = item['quantity'] ?? item['hldg_qty'] ?? item['qty'] ?? item['ovrs_cblc_qty'] ?? item['cblc_qty'] ?? item['frcr_evlu_qty'] ?? 0;
-              if (qtyValue is num) {
-                quantity = qtyValue.toInt();
-              } else if (qtyValue is String) {
-                quantity = int.tryParse(qtyValue) ?? 0;
-              }
-            } catch (e) {
-              print('⚠️ 수량 변환 실패: $e');
-              quantity = 0;
-            }
-            
-            double avgPrice = 0.0;
-            try {
-              final priceValue = item['avgPrice'] ?? item['avg_prc'] ?? item['pchs_avg_pric'] ?? item['pchs_avg'] ?? 0;
-              if (priceValue is num) {
-                avgPrice = priceValue.toDouble();
-              } else if (priceValue is String) {
-                avgPrice = double.tryParse(priceValue) ?? 0.0;
-              }
-            } catch (e) {
-              print('⚠️ 평균가 변환 실패: $e');
-              avgPrice = 0.0;
-            }
-
-            // 정규화 과정 디버깅
-            print('🔧 정규화: $stockCode ($stockName) - 수량: $quantity, 평균가: $avgPrice');
-            
-            if (stockCode.isEmpty) {
-              print('❌ 종목코드가 비어있음 - 제외');
-              return <String, dynamic>{};
-            }
-
-            final normalizedItem = <String, dynamic>{
-              'stockCode': stockCode,
-              'stockName': stockName,
-              'quantity': quantity,
-              'avgPrice': avgPrice,
-              if (marketLabel.isNotEmpty) 'market': marketLabel,
-              if (exchangeCode.isNotEmpty) 'exchangeCode': exchangeCode,
-            };
-            
-            print('✅ 정규화 완료: $normalizedItem');
-            return normalizedItem;
-          })
-          .where((e) => e.isNotEmpty)
-          // 수량 0(매도 완료)은 보유목록에서 제외
-          .where((e) {
-            final qty = (e['quantity'] as int?) ?? 0;
-            if (qty <= 0) {
-              print('🗑️ 보유 제외(수량 0): ${e['stockCode']} ${e['stockName']}');
-              return false;
-            }
-            return true;
-          })
-          .toList();
-      
-      print('📊 전체 보유종목: ${allHoldings.length}개');
-      
-      // 5. 보유종목 상세 정보 출력
-      for (final holding in allHoldings) {
-        final stockCode = holding['stockCode'] as String? ?? '';
-        final stockName = holding['stockName'] as String? ?? '';
-        final quantity = holding['quantity'] as int? ?? 0;
-        final isOverseas = _isNasdaqStock(stockCode);
-        print('📊 보유종목: $stockCode ($stockName) - ${quantity}주 ${isOverseas ? '(해외)' : '(국내)'}');
-      }
-      
-      // 6. AppDataManager에 저장 (다른 화면과 동기화)
-      AppDataManager.instance.positions = allHoldings;
-      
-      // 7. 종목명 매핑 개선
-      await _improveStockNames();
-      
-      // 8. 모든 API 조회 완료 후 화면 업데이트
-      if (mounted) {
-        setState(() {
-          _holdingsItems = allHoldings;
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+      final results = await AnalysisFunctionsService().analyzeHoldings(uid: uid, days: 100);
+      setState(() {
+        _holdingsItems = results
+            .map((r) => {
+                  'stockCode': (r['symbol'] ?? r['id']).toString(),
+                  'analysis': r,
+                  'comprehensiveScore': r['comprehensiveScore'],
+                })
+            .toList();
+        _holdingsItems.sort((a, b) {
+          final sa = (a['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
+          final sb = (b['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
+          return sb.compareTo(sa);
         });
-        print('✅ 화면 업데이트 완료: ${_holdingsItems.length}개');
-      }
-      
-      // 9. 보유종목이 있을 때만 강제 갱신 (성능 최적화)
-      if (allHoldings.isNotEmpty) {
-        print('🔄 보유종목 강제 갱신 시작...');
-        await _forceRefreshAllHoldingsData();
-      }
-
-      // 10. 보유종목 차트 데이터 선로딩 (국내/해외 모두)
-      if (_holdingsItems.isNotEmpty) {
-        print('📈 보유종목 차트 데이터 선로딩 시작... (${_holdingsItems.length}개)');
-        // UI 블록 방지를 위해 백그라운드로 실행
-        Future(() async {
-          await _prefetchHoldingsCharts(maxConcurrency: 3);
-          print('✅ 보유종목 차트 데이터 선로딩 완료');
-        });
-      }
-      
-      print('✅ 보유종목 완전 로드 완료: ${_holdingsItems.length}개');
-      
+      });
+      print('✅ 보유종목 서버 분석 로드 완료: ${_holdingsItems.length}개');
     } catch (e) {
-      print('❌ 보유종목 로드 실패: $e');
-      print('❌ 에러 상세: ${e.toString()}');
-      print('❌ 에러 스택: ${StackTrace.current}');
-      
-      // 에러 발생 시 빈 배열로 설정 (mounted 체크)
-      if (mounted) {
-        setState(() {
-          _holdingsItems = [];
-        });
-        print('✅ 에러 후 빈 보유종목 설정');
-      }
+      print('❌ 보유종목 서버 호출 실패: $e');
+      if (mounted) setState(() => _holdingsItems = []);
     }
-    print('💼 _loadHoldings() 함수 종료');
+    print('💼 _loadHoldings() 서버 호출 종료');
   }
 
   /// 종목명 매핑 개선
@@ -1115,7 +883,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
         
         // 차트 데이터도 조회 (일봉 데이터) - 통일된 API 서비스 사용
         try {
-          List<Map<String, dynamic>> chartData = await _unifiedApiService.getDailyChart(stockCode, count: 80);
+          List<Map<String, dynamic>> chartData = await _unifiedApiService.getDailyChart(stockCode, count: 100);
           
           if (chartData.isNotEmpty) {
             // 로컬 DB에 저장 (upsertDailyBars 사용)
@@ -1133,7 +901,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
               stockCode: stockCode,
               market: market,
               bars: bars,
-              keepDays: 60,
+              keepDays: 100,
             );
             print('✅ 차트 데이터 저장 완료: $stockCode');
           }
@@ -1167,21 +935,13 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
         final realtimeData = await _realtimeDataRepository.getLatestRealtimeData(stockCode);
         
         // 2. 로컬 DB에서 히스토리 데이터 가져오기
-        final historicalData = await _historicalDataRepository.getRecentBars(stockCode, limit: 80);
+        final historicalData = await _historicalDataRepository.getRecentBars(stockCode, limit: 100);
         
         if (realtimeData != null && historicalData.isNotEmpty) {
           print('✅ 로컬 DB 데이터 발견: $stockCode');
           
-          // 3. UnifiedAnalysisService를 사용하여 분석 수행
-          final analysisResult = await _unifiedAnalysis.analyzeStock(
-            stockCode,
-            currentPrice: (realtimeData['current_price'] ?? 0.0).toDouble(),
-            prevClose: (realtimeData['prev_close'] ?? 0.0).toDouble(),
-            volume: (realtimeData['volume'] ?? 0).toDouble(),
-            highPrice: (realtimeData['high_price'] ?? 0.0).toDouble(),
-            lowPrice: (realtimeData['low_price'] ?? 0.0).toDouble(),
-            openPrice: (realtimeData['open_price'] ?? 0.0).toDouble(),
-          );
+          // 3. UnifiedAnalysisService를 사용하여 분석 수행 (서버 위임)
+          final analysisResult = await _unifiedAnalysis.analyzeStock(stockCode, days: 100);
           
           if (analysisResult != null) {
             // 종목 정보 추가
@@ -1361,16 +1121,8 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
       
       print('✅ API 최신 데이터 사용: $stockCode');
         
-        // 3. UnifiedAnalysisService를 사용하여 분석 수행
-        final analysisResult = await _unifiedAnalysis.analyzeStock(
-          stockCode,
-        currentPrice: _toDouble(currentPriceData['currentPrice']),
-        prevClose: _toDouble(currentPriceData['prevClose']),
-        volume: _toDouble(currentPriceData['volume']),
-          highPrice: _toDouble(currentPriceData['highPrice']),
-          lowPrice: _toDouble(currentPriceData['lowPrice']),
-          openPrice: _toDouble(currentPriceData['openPrice']),
-        );
+        // 3. UnifiedAnalysisService를 사용하여 분석 수행 (서버 위임)
+        final analysisResult = await _unifiedAnalysis.analyzeStock(stockCode, days: 100);
         
         if (analysisResult != null) {
           // 종목 정보 추가
@@ -1618,17 +1370,8 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
           print('📊 [AnalysisScreen] 강제 새로고침 - 현재가 데이터: $currentPriceData');
           final chartData = await _collectAndCacheChartData(stockCode);
           
-          // 새로 분석 수행
-          final analysisResult = await _unifiedAnalysis.analyzeStock(
-            stockCode,
-            currentPrice: _toDouble(currentPriceData?['currentPrice']),
-            prevClose: _toDouble(currentPriceData?['prevClose']),
-            volume: _toDouble(currentPriceData?['volume']),
-            highPrice: _toDouble(currentPriceData?['highPrice']),
-            lowPrice: _toDouble(currentPriceData?['lowPrice']),
-            openPrice: _toDouble(currentPriceData?['openPrice']),
-            investmentStyle: _currentStyle,
-          );
+          // 새로 분석 수행 (서버 위임)
+          final analysisResult = await _unifiedAnalysis.analyzeStock(stockCode, days: 100);
           
           if (analysisResult != null) {
             _analysisResults[stockCode] = analysisResult;
@@ -1802,17 +1545,8 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
         print('⚠️ 차트 데이터 없음 ($stockCode) - 기본값으로 분석 진행');
       }
 
-      // 3. UnifiedAnalysisService를 사용하여 분석 수행
-      final analysisResult = await _unifiedAnalysis.analyzeStock(
-        stockCode,
-        currentPrice: _toDouble(currentPriceData['prpr']),
-        prevClose: _toDouble(currentPriceData['stck_prdy_clpr']),
-        volume: _toDouble(currentPriceData['acml_vol']),
-        highPrice: _toDouble(currentPriceData['high']),
-        lowPrice: _toDouble(currentPriceData['low']),
-        openPrice: _toDouble(currentPriceData['open']),
-        investmentStyle: _currentStyle,
-      );
+      // 3. UnifiedAnalysisService를 사용하여 분석 수행 (서버 위임)
+      final analysisResult = await _unifiedAnalysis.analyzeStock(stockCode, days: 100);
 
       if (analysisResult != null) {
         // 종목 정보 추가
@@ -1862,17 +1596,8 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
         print('⚠️ 차트 데이터 없음 ($stockCode) - 기본값으로 분석 진행');
       }
 
-      // 3. UnifiedAnalysisService를 사용하여 분석 수행
-      final analysisResult = await _unifiedAnalysis.analyzeStock(
-        stockCode,
-        currentPrice: _toDouble(currentPriceData['prpr']),
-        prevClose: _toDouble(currentPriceData['stck_prdy_clpr']),
-        volume: _toDouble(currentPriceData['acml_vol']),
-        highPrice: _toDouble(currentPriceData['high']),
-        lowPrice: _toDouble(currentPriceData['low']),
-        openPrice: _toDouble(currentPriceData['open']),
-        investmentStyle: _currentStyle,
-      );
+      // 3. UnifiedAnalysisService를 사용하여 분석 수행 (서버 위임)
+      final analysisResult = await _unifiedAnalysis.analyzeStock(stockCode, days: 100);
 
       if (analysisResult != null) {
         // 보유종목 정보 추가
@@ -3561,7 +3286,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
       // 3. 시장별 차트 데이터 조회 (통일된 API 서비스 사용)
       List<Map<String, dynamic>> rawKisData = [];
       try {
-        rawKisData = await _unifiedApiService.getDailyChart(stockCode, count: 80);
+        rawKisData = await _unifiedApiService.getDailyChart(stockCode, count: 100);
         print('📊 차트 데이터 조회 ($stockCode): ${rawKisData.length}개');
         
         if (rawKisData.isNotEmpty) {
@@ -3604,18 +3329,9 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
       print('  - 저가: $chartLowPrice');
       print('  - 시가: $chartOpenPrice');
       
-      // 6. AI 분석 서비스로 분석 수행
+      // 6. AI 분석 서비스로 분석 수행 (서버 위임)
       print('🤖 AI 분석 시작 ($stockCode) - 투자 스타일: ${_getStyleName(currentUserStyle)}');
-      final analysis = await _unifiedAnalysis.analyzeStock(
-        stockCode,
-        currentPrice: chartCurrentPrice,
-        prevClose: prevClose,
-        volume: chartVolume,
-        highPrice: chartHighPrice,
-        lowPrice: chartLowPrice,
-        openPrice: chartOpenPrice,
-        investmentStyle: _currentStyle,
-      );
+      final analysis = await _unifiedAnalysis.analyzeStock(stockCode, days: 100);
 
       // 5. 분석 결과 반환
       if (analysis != null) {

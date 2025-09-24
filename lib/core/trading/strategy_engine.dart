@@ -1,4 +1,3 @@
-import '../analysis/unified_analysis_service.dart';
 import '../data/app_data_manager.dart';
 import 'investment_style_manager.dart';
 
@@ -18,7 +17,6 @@ class StrategyDecision {
 
 /// 새로운 7가지 동적 지표 시스템 기반 전략 엔진
 class StrategyEngine {
-  final UnifiedAnalysisService _unifiedAnalysis = UnifiedAnalysisService.instance;
   final AppDataManager _appDataManager = AppDataManager.instance;
   final InvestmentStyleManager _styleManager = InvestmentStyleManager();
 
@@ -27,7 +25,7 @@ class StrategyEngine {
       print('🤖 [StrategyEngine] $stockCode 종목 분석 시작');
 
       // 새로운 7가지 동적 지표 시스템으로 분석
-      final analysis = await _unifiedAnalysis.analyzeStock(stockCode);
+      final analysis = await _appDataManager.analyzeStock(stockCode);
       
       if (analysis == null || analysis.isEmpty) {
         return StrategyDecision(

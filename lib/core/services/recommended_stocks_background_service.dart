@@ -3,7 +3,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../data/app_data_manager.dart';
 import '../ai/ai_recommendation_service.dart';
 import '../data/recommended_stocks_data.dart';
-import '../analysis/unified_analysis_service.dart';
 import '../api/kis_unified_api_service.dart';
 import '../trading/investment_style_manager.dart';
 import '../database/database_helper.dart';
@@ -28,7 +27,6 @@ class RecommendedStocksBackgroundService {
   final AppDataManager _appDataManager = AppDataManager.instance;
   final AiRecommendationService _aiService = AiRecommendationService();
   final RecommendedStocksData _recommendedStocksData = RecommendedStocksData();
-  final UnifiedAnalysisService _unifiedAnalysis = UnifiedAnalysisService.instance;
   final InvestmentStyleManager _styleManager = InvestmentStyleManager();
 
   // 계산 상태

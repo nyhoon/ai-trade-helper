@@ -25,10 +25,10 @@ import '../database/repositories/historical_data_repository.dart';
 import '../database/repositories/chart_data_repository.dart';
 import '../database/repositories/notification_history_repository.dart';
 import '../services/signal_tracker.dart';
-import '../analysis/unified_analysis_service.dart';
 import '../services/trade_status_tracker.dart';
 import '../services/realtime_price_service.dart';
 import '../services/realtime_score_service.dart';
+import '../analysis/unified_analysis_service.dart';
 import '../services/local_notification_manager.dart';
 import '../ui/realtime_ui_manager.dart';
 import '../trading/auto_trading_cycle.dart';
@@ -1888,8 +1888,9 @@ class AppDataManager {
       
       try {
         // 간단한 분석만 수행 (무거운 100일 분석 제거)
+        // 서버 분석 Shim 사용
         final ai = UnifiedAnalysisService.instance;
-        final analysis = await ai.analyzeStock(stockCode);
+        final analysis = await ai.analyzeStock(stockCode, days: 100);
         
         if (analysis != null && analysis.isNotEmpty) {
           currentSignal = analysis['signal']?.toString() ?? '관망';
@@ -2662,5 +2663,8 @@ class AppDataManager {
     return RegExp(r'^[A-Z]{1,6}$').hasMatch(stockCode);
   }
 
+  Future<Map<String, dynamic>> analyzeStock(String stockCode, {int days = 100}) async {
+    return await realtimeScoreService.analyzeStock(stockCode, days: days);
+  }
 }
 

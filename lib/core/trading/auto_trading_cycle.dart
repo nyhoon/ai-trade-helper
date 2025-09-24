@@ -8,7 +8,6 @@ import '../database/repositories/investment_style_repository.dart';
 import '../database/repositories/current_price_repository.dart';
 import '../database/repositories/analysis_results_repository.dart';
 import '../services/local_notification_manager.dart';
-import '../analysis/unified_analysis_service.dart';
 import 'signal_types.dart';
 import 'investment_style.dart';
 import 'investment_style_manager.dart';
@@ -16,6 +15,7 @@ import '../api/kis_unified_api_service.dart';
 import 'order_processor.dart';
 import 'market_time_validator.dart';
 import 'debug_trading_helper.dart';
+import '../analysis/unified_analysis_service.dart';
 
 /// 자동매매 시스템 메인 사이클 (3분마다 반복)
 class AutoTradingCycle {
@@ -35,8 +35,8 @@ class AutoTradingCycle {
   final HoldingsRepository _holdingsRepo = HoldingsRepository();
   final InvestmentStyleRepository _styleRepo = InvestmentStyleRepository();
   final CurrentPriceRepository _currentPriceRepo = CurrentPriceRepository();
-  final LocalNotificationManager _notificationManager = LocalNotificationManager();
   final UnifiedAnalysisService _unifiedAnalysis = UnifiedAnalysisService.instance;
+  final LocalNotificationManager _notificationManager = LocalNotificationManager();
   final InvestmentStyleManager _styleManager = InvestmentStyleManager();
   final KisUnifiedApiService _unifiedApiService = KisUnifiedApiService();
   final OrderProcessor _orderProcessor = OrderProcessor();
@@ -205,20 +205,8 @@ class AutoTradingCycle {
 
           }
           
-          // 통합 분석 서비스로 분석 (분석탭과 동일한 파라미터)
-          final analysis = await _unifiedAnalysis.analyzeStock(
-            stockCode,
-            currentPrice: currentPrice,
-            prevClose: (currentPriceData?['prevClose'] as num?)?.toDouble() ?? 
-                      (currentPriceData?['prev_close'] as num?)?.toDouble() ?? currentPrice,
-            volume: (currentPriceData?['volume'] as num?)?.toDouble() ?? 0.0,
-            highPrice: (currentPriceData?['high'] as num?)?.toDouble() ?? 
-                      (currentPriceData?['highPrice'] as num?)?.toDouble() ?? currentPrice,
-            lowPrice: (currentPriceData?['low'] as num?)?.toDouble() ?? 
-                     (currentPriceData?['lowPrice'] as num?)?.toDouble() ?? currentPrice,
-            openPrice: (currentPriceData?['open'] as num?)?.toDouble() ?? 
-                      (currentPriceData?['openPrice'] as num?)?.toDouble() ?? currentPrice,
-          );
+          // 통합 분석 서비스로 서버 분석 호출 (Shim)
+          final analysis = await _unifiedAnalysis.analyzeStock(stockCode, days: 100);
           if (analysis == null) {
             print('⚠️ 기술적 분석 실패: $stockCode');
             continue;
@@ -535,7 +523,7 @@ class AutoTradingCycle {
           
           try {
             // 로컬DB에서 차트 데이터 먼저 확인
-            final localChartData = await _appDataManager.historicalDataRepo.getRecentBars(stockCode, limit: 80);
+            final localChartData = await _appDataManager.historicalDataRepo.getRecentBars(stockCode, limit: 100);
             if (localChartData.isNotEmpty) {
               print('📊 [AutoTradingCycle] 로컬 DB에서 데이터 발견: $stockCode (${localChartData.length}개)');
               chartData = localChartData;
@@ -544,7 +532,7 @@ class AutoTradingCycle {
               // 로컬DB에 없을 때만 API 호출 (폴백)
               // 통일된 API 서비스로 차트 데이터 조회
               print('📈 차트 데이터 조회: $stockCode');
-              chartData = await _unifiedApiService.getDailyChart(stockCode, count: 80);
+              chartData = await _unifiedApiService.getDailyChart(stockCode, count: 100);
             }
             
             print('📊 차트 데이터 조회 결과: $stockCode - ${chartData.length}개');

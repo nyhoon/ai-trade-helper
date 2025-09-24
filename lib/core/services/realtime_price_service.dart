@@ -2,8 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../data/app_data_manager.dart';
-import '../database/repositories/stock_prices_repository.dart';
 import '../analysis/unified_analysis_service.dart';
+import '../database/repositories/stock_prices_repository.dart';
 import '../trading/investment_style.dart';
 import '../trading/investment_style_manager.dart';
 import '../trading/market_time_validator.dart';
@@ -24,7 +24,6 @@ class RealtimePriceService {
   
   final StockPricesRepository _priceRepo = StockPricesRepository();
   // UnifiedAnalysisService는 필요할 때만 참조 (순환 참조 방지)
-  UnifiedAnalysisService get _unifiedAnalysis => UnifiedAnalysisService.instance;
   final InvestmentStyleManager _styleManager = InvestmentStyleManager();
   
   // 실시간 가격 스트림
@@ -387,15 +386,7 @@ class RealtimePriceService {
       print('   - 매도 임계값: ${styleParams['sellThreshold']}');
       
       // AI 분석 서비스로 시그널 재분석 (투자스타일 파라미터 적용)
-      final analysis = await _unifiedAnalysis.analyzeStock(
-        stockCode,
-        currentPrice: currentPrice,
-        prevClose: _lastPrices[stockCode] ?? currentPrice,
-        volume: 0,
-        highPrice: currentPrice,
-        lowPrice: currentPrice,
-        openPrice: currentPrice,
-      );
+      final analysis = await UnifiedAnalysisService.instance.analyzeStock(stockCode, days: 100);
       
       // 실시간 시그널은 AutoTradingCycle에서 처리하므로 여기서는 건너뜀
       // if (analysis != null && (analysis['signal'] == '매수' || analysis['signal'] == '매도')) {

@@ -352,6 +352,7 @@ class KisUnifiedApiService {
               if ((rate == null || rate == 0) && pr != null && pc != null && pc != 0) {
                 rate = ((pr - pc) / pc) * 100;
               }
+              // TODO(server-migration): kClientWritesEnabled=false 시 서버로 이전
               await FirebaseFirestore.instance.collection('prices').doc(stockCode).set({
                 'stock_name': stockName,
                 'market': market,
@@ -524,6 +525,7 @@ class KisUnifiedApiService {
             }
             if (name.isEmpty) name = symbol; // 최후 폴백
 
+            // TODO(server-migration): kClientWritesEnabled=false 시 서버로 이전
             await FirebaseFirestore.instance.collection('prices').doc(symbol).set({
               'stock_name': name,
               'market': market,

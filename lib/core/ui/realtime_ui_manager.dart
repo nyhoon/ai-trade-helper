@@ -6,7 +6,6 @@ import '../database/repositories/signal_history_repository.dart';
 import '../database/repositories/notification_history_repository.dart';
 import '../database/repositories/trade_history_repository.dart';
 import '../services/realtime_price_service.dart';
-import '../services/realtime_score_service.dart';
 import '../database/repositories/stock_prices_repository.dart';
 
 /// 실시간 UI 업데이트 관리자 (사일런트 리프레시)
@@ -53,7 +52,7 @@ class RealtimeUIManager {
   Map<String, dynamic> _lastTopStocksData = {};
   
   // 실시간 점수 서비스
-  final RealtimeScoreService _scoreService = RealtimeScoreService();
+  // final RealtimeScoreService _scoreService = RealtimeScoreService(); // Removed as per edit hint
 
   /// 초기화
   Future<void> initialize() async {
@@ -66,7 +65,7 @@ class RealtimeUIManager {
       _subscribeToPriceUpdates();
       
       // 실시간 점수 서비스 구독
-      _subscribeToScoreUpdates();
+      // _subscribeToScoreUpdates(); // Removed as per edit hint
       
       // 주기적 업데이트 시작 (10초마다 - 사일런트)
       _startPeriodicUpdates();
@@ -105,21 +104,21 @@ class RealtimeUIManager {
   }
 
   /// 실시간 점수 업데이트 구독 (사일런트)
-  void _subscribeToScoreUpdates() {
-    _scoreService.topStocksStream.listen(
-      (topStocks) {
-        // 변경사항이 있을 때만 스트림 발행 (깜빡임 방지)
-        if (_hasDataChanged(_lastTopStocksData, topStocks)) {
-          _lastTopStocksData = _createDataSnapshot(topStocks);
-          _topStocksController.add(topStocks);
-          print('📊 상위 점수 종목 사일런트 업데이트: ${topStocks.length}개');
-        }
-      },
-      onError: (error) {
-        print('❌ 실시간 점수 스트림 오류: $error');
-      },
-    );
-  }
+  // void _subscribeToScoreUpdates() { // Removed as per edit hint
+  //   _scoreService.topStocksStream.listen( // Removed as per edit hint
+  //     (topStocks) { // Removed as per edit hint
+  //       // 변경사항이 있을 때만 스트림 발행 (깜빡임 방지) // Removed as per edit hint
+  //       if (_hasDataChanged(_lastTopStocksData, topStocks)) { // Removed as per edit hint
+  //         _lastTopStocksData = _createDataSnapshot(topStocks); // Removed as per edit hint
+  //         _topStocksController.add(topStocks); // Removed as per edit hint
+  //         print('📊 상위 점수 종목 사일런트 업데이트: ${topStocks.length}개'); // Removed as per edit hint
+  //       } // Removed as per edit hint
+  //     }, // Removed as per edit hint
+  //     onError: (error) { // Removed as per edit hint
+  //       print('❌ 실시간 점수 스트림 오류: $error'); // Removed as per edit hint
+  //     }, // Removed as per edit hint
+  //   ); // Removed as per edit hint
+  // } // Removed as per edit hint
 
   /// 주기적 업데이트 시작 (사일런트)
   void _startPeriodicUpdates() {
@@ -443,17 +442,17 @@ class RealtimeUIManager {
   Future<void> _refreshTopStocksSilent() async {
     try {
       // 실시간 점수 서비스에서 상위 종목 조회
-      final topStocks = await _scoreService.getTopStocks(
-        limit: 100,
-        minScore: 0.3,
-      );
+      // final topStocks = await _scoreService.getTopStocks( // Removed as per edit hint
+      //   limit: 100, // Removed as per edit hint
+      //   minScore: 0.3, // Removed as per edit hint
+      // ); // Removed as per edit hint
       
       // 변경사항이 있을 때만 스트림 발행 (깜빡임 방지)
-      if (_hasDataChanged(_lastTopStocksData, topStocks)) {
-        _lastTopStocksData = _createDataSnapshot(topStocks);
-        _topStocksController.add(topStocks);
-        print('📊 상위 점수 종목 사일런트 업데이트: ${topStocks.length}개');
-      }
+      // if (_hasDataChanged(_lastTopStocksData, topStocks)) { // Removed as per edit hint
+      //   _lastTopStocksData = _createDataSnapshot(topStocks); // Removed as per edit hint
+      //   _topStocksController.add(topStocks); // Removed as per edit hint
+      //   print('📊 상위 점수 종목 사일런트 업데이트: ${topStocks.length}개'); // Removed as per edit hint
+      // } // Removed as per edit hint
     } catch (e) {
       print('❌ 상위 점수 종목 새로고침 실패: $e');
     }
@@ -462,7 +461,7 @@ class RealtimeUIManager {
   /// 정리
   void dispose() {
     _updateTimer?.cancel();
-    _scoreService.stop();
+    // _scoreService.stop(); // Removed as per edit hint
     _holdingsController.close();
     _signalsController.close();
     _notificationsController.close();

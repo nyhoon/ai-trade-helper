@@ -1,0 +1,75 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    // 사용자별 데이터(명시)
+    match /users/{uid}/watchlist/{doc} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+    match /users/{uid}/holdings/{doc} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // 사용자 전체(포괄) - 위와 동일한 조건, 중복 허용
+    match /users/{uid}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // 마스터/차트/디버그
+    match /stock_master/{doc} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+    match /charts/{doc} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+    match /charts/{symbol}/daily/{doc} {
+ 		 allow read: if true;
+  	 allow write: if request.auth != null; // Functions 이전 시 서버 전용으로 변경 권장
+		}
+		match /logs/{doc} {
+  		allow read: if request.auth != null;   // 내부만 열람
+  		allow write: if request.auth != null;  // 앱/Functions에서 기록
+		}
+    match /debug/{doc} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // 계산 결과는 읽기 전용(추후 Functions 전용으로 변경)
+    match /computed/{document=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /prices/{doc} {
+ 		  allow read: if true;
+  		allow write: if request.auth != null;
+		}
+	function isServer() {
+  // Firebase Admin SDK(서비스 계정)로 서명된 요청만 허용
+  return request.auth != null && request.auth.token.firebase.sign_in_provider == 'custom';
+}
+
+// 서버 전용 쓰기 전환(차후)
+// 1) 지금은 주석처리. 전환 시 charts/computed/prices의 write 조건을 isServer()로 바꿉니다.
+/*
+match /charts/{doc} {
+  allow read: if true;
+  allow write: if isServer();
+}
+match /charts/{symbol}/daily/{doc} {
+  allow read: if true;
+  allow write: if isServer();
+}
+match /computed/{document=**} {
+  allow read: if true;
+  allow write: if isServer();
+}
+match /prices/{doc} {
+  allow read: if true;
+  allow write: if isServer(); // 전환 시 앱 쓰기 차단
+}
+*/
+  }
+}

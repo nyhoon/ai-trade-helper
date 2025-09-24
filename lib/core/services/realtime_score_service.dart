@@ -5,6 +5,7 @@ import '../analysis/unified_analysis_service.dart';
 import '../database/repositories/stock_prices_repository.dart';
 import '../database/repositories/chart_data_repository.dart';
 import '../trading/investment_style_manager.dart';
+import '../remote/analysis_functions_service.dart';
 
 /// 실시간 점수 계산 및 스트림 서비스
 /// 기존 실시간 파이프라인과 통합하여 점수를 실시간으로 계산하고 상위 종목을 추출
@@ -420,5 +421,11 @@ class RealtimeScoreService {
       'scoreUpdateInterval': _scoreUpdateInterval.inSeconds,
       'topStocksUpdateInterval': _topStocksUpdateInterval.inSeconds,
     };
+  }
+
+  final AnalysisFunctionsService _functions = AnalysisFunctionsService();
+
+  Future<Map<String, dynamic>> analyzeStock(String symbol, {int days = 100}) async {
+    return await _functions.analyzeStock(symbol: symbol, days: days);
   }
 }

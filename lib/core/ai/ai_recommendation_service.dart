@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import '../analysis/unified_analysis_service.dart';
 import '../data/recommended_stocks_data.dart';
 import '../database/repositories/historical_data_repository.dart';
 import '../database/repositories/current_price_repository.dart';
@@ -12,6 +11,7 @@ import '../constants/chart_constants.dart';
 import '../trading/investment_style.dart';
 import '../trading/investment_style_manager.dart';
 import '../services/local_notification_manager.dart';
+import '../analysis/unified_analysis_service.dart';
 
 /// AI 추천 서비스
 ///
@@ -31,7 +31,7 @@ class AiRecommendationService {
   AiRecommendationService._internal();
 
   // 일봉 최소 확보 개수 (전 구간 공통)
-  static const int CHART_MIN_BARS = 80;
+  static const int CHART_MIN_BARS = 100;
 
   bool _isInitialized = false;
   bool _isInitialDataCollected = false;

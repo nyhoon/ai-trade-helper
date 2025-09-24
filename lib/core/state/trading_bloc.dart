@@ -234,16 +234,7 @@ class TradingBloc extends Bloc<TradingEvent, TradingState> {
       
       // 2. 명시적 파라미터로 analyzeStock 호출 (추천종목과 동일한 방식)
       // 🔧 모든 화면에서 동일한 데이터 소스 사용: SQL DB 우선 → API 폴백
-      return await _unifiedAnalysis.analyzeStock(
-        stockCode,
-        currentPrice: (stockData['prpr'] as num?)?.toDouble() ?? (stockData['currentPrice'] as num?)?.toDouble(),
-        prevClose: (stockData['stck_prdy_clpr'] as num?)?.toDouble() ?? (stockData['prevClose'] as num?)?.toDouble(),
-        volume: (stockData['acml_vol'] as num?)?.toDouble() ?? (stockData['volume'] as num?)?.toDouble(),
-        highPrice: (stockData['stck_hgpr'] as num?)?.toDouble() ?? (stockData['high'] as num?)?.toDouble(),
-        lowPrice: (stockData['stck_lwpr'] as num?)?.toDouble() ?? (stockData['low'] as num?)?.toDouble(),
-        openPrice: (stockData['stck_oprc'] as num?)?.toDouble() ?? (stockData['open'] as num?)?.toDouble(),
-        investmentStyle: currentStyle,
-      );
+      return await _unifiedAnalysis.analyzeStock(stockCode, days: 100);
     } catch (e) {
       print('❌ 분석 실패: $e');
       return null;

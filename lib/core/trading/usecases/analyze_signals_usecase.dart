@@ -42,8 +42,7 @@ class AnalyzeSignalsUseCase {
         final price = await _currentPrice(code);
         if (price <= 0) continue;
         
-        final analysis = await _unifiedAnalysis.analyzeStock(code,
-            currentPrice: price, prevClose: 0, volume: 0, highPrice: price, lowPrice: price, openPrice: price);
+        final analysis = await _unifiedAnalysis.analyzeStock(code, days: 100);
         
         if (analysis != null && (analysis['signal'] == '매수' || analysis['signal'] == '매도')) {
           // 임계값 기반 시그널 분석 (종합점수 vs 임계값)

@@ -25,10 +25,10 @@ import 'core/data/app_data_manager.dart';
 import 'core/config/api_config.dart';
 import 'core/api/kis_unified_api_service.dart';
 import 'core/analysis/signal_notification_system.dart';
-import 'core/services/realtime_score_service.dart';
 import 'features/splash/splash_screen.dart';
 import 'features/main/main_screen.dart';
 import 'features/onboarding/api_key_setup_screen.dart';
+import 'core/testing/integration_smoke_tests.dart';
 
 Future<void> pingFirestoreOnce() async {
   final docRef = FirebaseFirestore.instance.collection('app_health').doc('ping');
@@ -62,6 +62,11 @@ void main() async {
       options: DefaultFirebaseOptions.currentPlatform,
     );
     print('✅ Firebase initialize 완료');
+    // 디버그 환경에서 서버 분석 스모크 테스트 1회 실행
+    assert(() {
+      IntegrationSmokeTests.runOnce();
+      return true;
+    }());
     // 인증(익명 로그인) - Firestore 쓰기 권한 확보용 (채널 초기화 이슈 대비 재시도)
     Future<void> _signInAnonWithRetry({int maxRetries = 3}) async {
       for (int attempt = 1; attempt <= maxRetries; attempt++) {

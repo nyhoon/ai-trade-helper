@@ -1,19 +1,17 @@
 import '../../../core/database/repositories/top_stocks_repository.dart';
-import '../../../core/services/realtime_score_service.dart';
 import '../../../core/data/app_data_manager.dart';
 import '../../../core/data/recommended_stocks_data.dart';
+// 실시간 점수 서비스 제거: 서버 분석으로 이전됨
+// import '../../../core/services/realtime_score_service.dart';
 
 /// 상위 점수 종목 UseCase
 /// MVI 패턴의 Domain 계층에서 비즈니스 로직 처리
 class TopStocksUseCase {
   final TopStocksRepository _repository;
-  final RealtimeScoreService _scoreService;
   
   TopStocksUseCase({
     TopStocksRepository? repository,
-    RealtimeScoreService? scoreService,
-  }) : _repository = repository ?? TopStocksRepository(),
-       _scoreService = scoreService ?? RealtimeScoreService();
+  }) : _repository = repository ?? TopStocksRepository();
 
   /// 상위 점수 종목 조회
   Future<List<Map<String, dynamic>>> getTopStocks({
@@ -38,14 +36,13 @@ class TopStocksUseCase {
         }
       }
       
-      // 실시간 서비스에서 최신 데이터 조회
-      final realtimeStocks = await _scoreService.getTopStocks(
+      // 실시간 서비스 제거: DB에서 조회(서버에서 계산 후 저장)
+      return await _repository.getTopStocks(
         limit: limit,
         minScore: minScore,
         market: market,
+        maxAgeMinutes: 5,
       );
-      
-      return realtimeStocks;
       
     } catch (e) {
       print('❌ 상위 점수 종목 조회 실패: $e');
@@ -103,18 +100,7 @@ class TopStocksUseCase {
   /// 특정 종목의 점수 조회
   Future<Map<String, dynamic>?> getStockScore(String stockCode) async {
     try {
-      // 실시간 서비스에서 먼저 조회
-      final realtimeScore = _scoreService.getCurrentScore(stockCode);
-      if (realtimeScore != null) {
-        return {
-          'stockCode': stockCode,
-          'score': realtimeScore,
-          'source': 'realtime',
-          'timestamp': DateTime.now().toIso8601String(),
-        };
-      }
-      
-      // DB에서 조회
+      // 서버에서 계산된 결과를 DB에서 조회
       return await _repository.getStockScore(stockCode);
       
     } catch (e) {
@@ -135,34 +121,23 @@ class TopStocksUseCase {
 
   /// 실시간 점수 스트림 구독
   Stream<Map<String, dynamic>> getScoreStream() {
-    return _scoreService.scoreStream;
+    // 실시간 스트림 제거. 빈 스트림 반환 또는 필요 시 Repository 기반 이벤트로 교체
+    return const Stream.empty();
   }
 
   /// 실시간 상위 종목 스트림 구독
   Stream<List<Map<String, dynamic>>> getTopStocksStream() {
-    return _scoreService.topStocksStream;
+    return const Stream.empty();
   }
 
   /// 실시간 점수 서비스 시작
-  Future<void> startRealtimeScoreService() async {
-    try {
-      await _scoreService.start();
-      print('✅ 실시간 점수 서비스 시작 완료');
-    } catch (e) {
-      print('❌ 실시간 점수 서비스 시작 실패: $e');
-    }
-  }
+  Future<void> startRealtimeScoreService() async {}
 
   /// 실시간 점수 서비스 중지
-  void stopRealtimeScoreService() {
-    _scoreService.stop();
-    print('⏹️ 실시간 점수 서비스 중지');
-  }
+  void stopRealtimeScoreService() {}
 
   /// 서비스 상태 조회
-  Map<String, dynamic> getServiceStatus() {
-    return _scoreService.getServiceStatus();
-  }
+  Map<String, dynamic> getServiceStatus() => {};
 
   /// 데이터 초기화
   Future<void> initializeData() async {
@@ -173,8 +148,7 @@ class TopStocksUseCase {
       // ignore: unawaited_futures
       _repository.normalizeStoredMarkets();
       
-      // 실시간 서비스 시작
-      await startRealtimeScoreService();
+      // 실시간 서비스 제거
       
       print('✅ 상위 점수 종목 데이터 초기화 완료');
       

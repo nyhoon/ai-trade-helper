@@ -100,13 +100,13 @@ class WatchlistRepository {
         chartData = await unifiedApiService.getOverseasDailyChart(
           symbol: stockCode,
           exchangeCode: 'NAS',
-          count: 80,
+          count: 100,
         );
       } else {
         print('🇰🇷 국내주식 차트 데이터 조회: $stockCode');
         chartData = await unifiedApiService.getDomesticDailyChart(
           stockCode: stockCode,
-          count: 80,
+          count: 100,
         );
       }
       

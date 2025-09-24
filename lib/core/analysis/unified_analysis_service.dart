@@ -1,3 +1,30 @@
+import '../remote/analysis_functions_service.dart';
+
+/// 서버 분석 Shim: 레거시 시그니처를 유지하며 Firebase Functions로 위임
+class UnifiedAnalysisService {
+  UnifiedAnalysisService._internal();
+  static final UnifiedAnalysisService instance = UnifiedAnalysisService._internal();
+
+  Future<Map<String, dynamic>?> analyzeStock(
+    String stockCode, {
+    dynamic currentPrice,
+    dynamic prevClose,
+    dynamic volume,
+    dynamic highPrice,
+    dynamic lowPrice,
+    dynamic openPrice,
+    dynamic investmentStyle,
+    int days = 100,
+  }) async {
+    try {
+      return await AnalysisFunctionsService().analyzeStock(symbol: stockCode, days: days);
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/*
 import 'dart:async';
 import 'dart:math';
 import '../data/app_data_manager.dart';
@@ -1865,3 +1892,4 @@ class UnifiedAnalysisService {
     }
   }
 }
+*/

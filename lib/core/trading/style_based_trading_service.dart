@@ -5,6 +5,7 @@ import 'investment_style.dart';
 import 'investment_style_manager.dart';
 import '../data/app_data_manager.dart';
 import '../analysis/technical_indicators.dart';
+import '../remote/analysis_functions_service.dart';
 import 'volume_threshold_manager.dart';
 import 'market_time_validator.dart';
 import '../database/repositories/current_price_repository.dart';
@@ -1114,7 +1115,25 @@ class StyleBasedTradingStrategy {
     };
   }
 
-
+  // 서버 분석 호출을 통한 매수 판단(실패 시 로컬 폴백)
+  Future<bool> generateBuySignalViaCloud(String symbol) async {
+    try {
+      final service = AnalysisFunctionsService();
+      final result = await service.analyzeStock(
+        symbol: symbol,
+        days: 100,
+        buyThreshold: config.buyThreshold,
+        sellThreshold: config.sellThreshold,
+      );
+      final decision = (result['tradingDecision'] as String?) ?? 'HOLD';
+      final score = (result['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
+      print('☁️ 서버 분석 결과: $symbol → decision=$decision, score=$score');
+      return decision == 'BUY';
+    } catch (e) {
+      print('☁️ 서버 분석 실패, 로컬 폴백 사용: $e');
+      return false; // 폴백 판단은 호출부에서 로컬 generateBuySignal로 진행
+    }
+  }
 }
 
 // 백테스터 클래스
@@ -1369,8 +1388,16 @@ class StyleBasedBacktester {
       for (final stockData in dailyData) {
         // 해당 종목을 이미 보유 중이 아닌지 확인
         if (!strategy.positions.containsKey(stockData.symbol)) {
-          final buySignal = strategy.generateBuySignal(stockData);
-                      final canBuy = risk.canTrade && strategy.positions.length < risk.maxPositions; // 실제 리스크 체크
+          bool buySignal = false;
+          // 서버 분석 우선 시도
+          final cloudOk = await strategy.generateBuySignalViaCloud(stockData.symbol);
+          if (cloudOk) {
+            buySignal = true;
+          } else {
+            // 폴백: 로컬 계산
+            buySignal = strategy.generateBuySignal(stockData);
+          }
+          final canBuy = risk.canTrade && strategy.positions.length < risk.maxPositions; // 실제 리스크 체크
           
           if (buySignal && canBuy) {
             final size = strategy.calculatePositionSize(stockData.close.toDouble(), symbol: stockData.symbol);
@@ -1626,7 +1653,15 @@ class StyleBasedBacktester {
         for (final stockData in dailyData) {
           // 해당 종목을 이미 보유 중이 아닌지 확인
           if (!strategy.positions.containsKey(stockData['symbol'])) {
-            final buySignal = strategy.generateBuySignal(stockData);
+            bool buySignal = false;
+            // 서버 분석 우선 시도
+            final cloudOk = await strategy.generateBuySignalViaCloud(stockData['symbol']);
+            if (cloudOk) {
+              buySignal = true;
+            } else {
+              // 폴백: 로컬 계산
+              buySignal = strategy.generateBuySignal(stockData);
+            }
             final canBuy = risk.canTrade && strategy.positions.length < risk.maxPositions; // 실제 리스크 체크
             
             if (buySignal && canBuy) {
@@ -1637,9 +1672,9 @@ class StyleBasedBacktester {
                 // 거래일 재검증
                 if (!_isTradingDay(currentDateTime)) {
                   print('⚠️ 매수 거래 취소: $currentDate는 거래 불가능한 날짜');
-            continue;
-          }
-          
+                  continue;
+                }
+                
                 strategy.executeBuy(stockData['symbol'], (stockData['close'] as num).toDouble(), size, currentDateTime);
                 tradeCount++;
                 
@@ -2229,14 +2264,14 @@ class StyleBasedBacktester {
             chartData = await unifiedApiService.getOverseasDailyChart(
               symbol: stockCode,
               exchangeCode: 'NAS',
-              count: 80,
+              count: 100,
             );
             print('🌍 $stockCode 해외주식 차트 데이터 조회 (관심종목: $marketType)');
           } else {
             // 국내주식 (분석탭과 동일한 방식)
             chartData = await unifiedApiService.getDomesticDailyChart(
               stockCode: stockCode,
-              count: 80,
+              count: 100,
             );
             print('🇰🇷 $stockCode 국내주식 차트 데이터 조회 (관심종목: $marketType)');
           }
@@ -2382,14 +2417,14 @@ class StyleBasedBacktester {
               chartData = await unifiedApiService.getOverseasDailyChart(
               symbol: stockCode,
               exchangeCode: 'NAS',
-              count: 80,
+              count: 100,
             );
               print('🌍 $stockCode 재시도 해외주식 차트 데이터 조회 (관심종목: $marketType)');
             } else {
               // 국내주식 (분석탭과 동일한 방식)
               chartData = await unifiedApiService.getDomesticDailyChart(
               stockCode: stockCode,
-              count: 80,
+              count: 100,
             );
               print('🇰🇷 $stockCode 재시도 국내주식 차트 데이터 조회 (관심종목: $marketType)');
             }
@@ -2621,7 +2656,7 @@ class StyleBasedBacktester {
           print('📊 $stockCode 기간별 차트 데이터 요청 중... (일별)');
           final dailyData = await unifiedApiService.getDomesticDailyChart(
             stockCode: stockCode,
-            count: 80,
+              count: 100,
           );
           print('📊 $stockCode 기간별 차트 데이터: ${dailyData.length}개');
           

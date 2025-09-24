@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
-import '../../core/services/recommended_stocks_service.dart';
-import '../../core/services/recommended_stocks_background_service.dart';
+import '../../core/remote/analysis_functions_service.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../../core/data/recommended_stocks_data.dart';
 import '../../core/ai/ai_recommendation_service.dart';
 import '../../core/data/app_data_manager.dart';
@@ -17,6 +17,29 @@ import '../../core/utils/stock_filter_utils.dart';
 import '../../core/trading/market_time_validator.dart';
 import 'widgets/freshness_indicator.dart';
 
+// 더미 클래스 정의 (서버 이전 동안 컴파일 안전용)
+class _DummyBackgroundService {
+  bool get isServiceEnabled => false;
+  bool get isServiceRunning => false;
+  void Function(bool isEnabled)? onServiceStatusChanged;
+  void Function(Map<String, dynamic> progress)? onCalculationProgress;
+  void Function(List<Map<String, dynamic>> topStocks)? onTopStocksUpdated;
+  Future<void> initialize() async {}
+  Future<void> toggleService() async {}
+  Future<void> stopService() async {}
+  Future<void> startService() async {}
+  Future<void> setMinTradingAmount(double amount) async {}
+  Future<void> scanMarketOnce(String market) async {}
+}
+
+class _DummyService {
+  Future<void> initialize() async {}
+}
+
+class _DummyAiService {
+  Future<void> initialize() async {}
+  void cleanupTemporaryUniverseData() {}
+}
 /// 실시간 추천종목 화면
 /// 나스닥, 코스피, 코스닥 각각 상위 10개 종목을 실시간으로 표시
 class RecommendedStocksScreen extends StatefulWidget {
@@ -27,11 +50,24 @@ class RecommendedStocksScreen extends StatefulWidget {
 }
 
 class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with WidgetsBindingObserver {
-  final RecommendedStocksService _service = RecommendedStocksService();
-  final RecommendedStocksBackgroundService _backgroundService = RecommendedStocksBackgroundService();
-  final AiRecommendationService _aiService = AiRecommendationService();
+  final AnalysisFunctionsService _functions = AnalysisFunctionsService();
   final TopStocksUseCase _topStocksUseCase = TopStocksUseCase();
   final TopStocksViewModel _topStocksViewModel = TopStocksViewModel();
+  // 서버 이전에 따라 로컬 백그라운드 계산 제거. 컴파일 안전을 위해 최소 필드만 유지
+  bool _isBackgroundServiceEnabled = false;
+  bool _isBackgroundServiceRunning = false;
+  double _calculationProgress = 0.0;
+  String _currentMarket = '';
+  String _currentStock = '';
+  int _processedCount = 0;
+  int _totalCount = 0;
+  int _progressTick = 0;
+  int _freshnessMinutes = 5;
+
+  // 더미 서비스: 기존 콜백/메서드 참조를 안전하게 무시하기 위함
+  final _DummyBackgroundService _backgroundService = _DummyBackgroundService();
+  final _DummyService _service = _DummyService();
+  final _DummyAiService _aiService = _DummyAiService();
   
   // MVI 패턴 상태 관리
   TopStocksViewState _currentState = const TopStocksViewState();
@@ -48,7 +84,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
   bool _isLoading = true;
   Set<String> _watchlistCodes = {};
   
-  // 실시간 서비스 상태
+  // 서비스 상태(서버 동기화 기준)
   String _serviceStatus = '초기화 중...';
   bool _isServiceRunning = false;
   int _calculatedStocksCount = 0;
@@ -63,18 +99,6 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
   int _localDataProgress = 0;
   int _localDataTotal = 0;
   String _currentLoadingTask = '';
-  
-  // 백그라운드 서비스 상태
-  bool _isBackgroundServiceEnabled = false;
-  bool _isBackgroundServiceRunning = false;
-  double _calculationProgress = 0.0;
-  String _currentMarket = '';
-  String _currentStock = '';
-  DateTime? _lastBackgroundUpdate;
-  int _processedCount = 0;
-  int _totalCount = 0;
-  int _progressTick = 0; // 헤더 업데이트 스로틀링용
-  static const int _freshnessMinutes = 3; // 새로고침과 동일 신선도 기준
   
   // 거래대금 설정
   double _minTradingAmount = 1000000000; // 10억원
@@ -92,6 +116,8 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
     WidgetsBinding.instance.addObserver(this);
     _initializeScreenFast();
   }
+
+// 아래는 컴파일 안전을 위한 더미 클래스. 서버 이전 후 제거 대상
 
   /// 시장별 즉시 스캔 버튼 묶음
   Widget _buildMarketScanButtons() {
@@ -140,8 +166,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
         ),
       );
       
-      // 백그라운드 서비스로 시장 스캔 실행
-      await _backgroundService.scanMarketOnce(market);
+      // 서버 Top-N은 시장단위 스캔 없이 제공. 필요 시 서버 확장 예정.
       
       setState(() {
         _serviceStatus = '$market 시장 스캔 완료';
@@ -187,7 +212,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
       }
     } catch (_) {}
     // 추천 화면 이탈 시: 409개 중 관심/보유 제외 임시 데이터 정리
-    _aiService.cleanupTemporaryUniverseData();
+      _aiService.cleanupTemporaryUniverseData();
     super.dispose();
   }
 
@@ -238,12 +263,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
   /// 백그라운드 초기화 (사용자 경험에 영향 없음)
   Future<void> _initializeInBackground() async {
     try {
-      print('🔄 백그라운드 초기화 시작...');
-      
-      // 기본 데이터 로딩 (백그라운드에서)
-      _loadExistingRecommendedStocks();
-      
-      // 빈 데이터로 초기화
+      print('🔄 서버 Top-N 초기화 시작...');
       if (mounted) {
         setState(() {
           _marketTopStocks = {
@@ -253,24 +273,9 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
           };
         });
       }
-      
-      // 나머지는 더 나중에
-      Future.delayed(const Duration(seconds: 2), () {
-        _setupMVI();
-      });
-      
-      Future.delayed(const Duration(seconds: 3), () {
-        _initializeServiceInBackground();
-        _setupBackgroundServiceInBackground();
-        // 자동 시작은 잠시 비활성화 (초기 진입 안정화). 사용자 토글 시 시작.
-        // _autoStartBackgroundService();
-      });
-
-      // 5분 주기 자동 새로고침 시작 (시장 점수/순위 주기 동기화)
       _startAutoRefreshTimer();
-      
     } catch (e) {
-      print('❌ 백그라운드 초기화 실패: $e');
+      print('❌ 초기화 실패: $e');
     }
   }
   /// 5분마다 화면 자동 새로고침 (시장 점수/순위 동기화)
@@ -284,66 +289,25 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
     });
   }
 
-  /// 백그라운드 서비스 자동 시작
-  Future<void> _autoStartBackgroundService() async {
-    try {
-      print('🚀 백그라운드 서비스 자동 시작...');
-      
-      // 서비스가 비활성화되어 있으면 자동으로 활성화
-      if (!_isBackgroundServiceEnabled) {
-        print('🔄 백그라운드 서비스 자동 활성화...');
-        await _backgroundService.toggleService();
-        
-        if (mounted) {
-          setState(() {
-            _isBackgroundServiceEnabled = true;
-          });
-        }
-      }
-      
-      print('✅ 백그라운드 서비스 자동 시작 완료');
-    } catch (e) {
-      print('❌ 백그라운드 서비스 자동 시작 실패: $e');
-    }
-  }
+  // 백그라운드 서비스는 서버 이전으로 제거됨
 
-  /// 백그라운드에서 서비스 초기화
+  /// 백그라운드에서 서비스 초기화 (서버 이전으로 축소)
   Future<void> _initializeServiceInBackground() async {
     try {
       setState(() {
-        _serviceStatus = '서비스 초기화 중...';
+        _serviceStatus = '서버 데이터 동기화 중...';
       });
-
-      // 병렬로 서비스 초기화
-      await Future.wait([
-        _service.initialize(),
-        _aiService.initialize(),
-        _topStocksUseCase.initializeData(),
-        _loadWatchlistCodes(),
-      ]);
-
-      setState(() {
-        _serviceStatus = '실시간 점수 계산 시작...';
-      });
-
-      // 시장별 상위 종목 로드 (병렬 처리)
       await _loadMarketTopStocksParallel();
-
-      // 실시간 서비스 상태 모니터링 시작
-      _startServiceStatusMonitoring();
-
-      setState(() {
-        _isLoading = false;
-        _isServiceRunning = true;
-        _serviceStatus = '실시간 점수 계산 중';
-      });
-
-    } catch (e) {
-      print('❌ 백그라운드 서비스 초기화 실패: $e');
       setState(() {
         _isLoading = false;
         _isServiceRunning = false;
-        _serviceStatus = '서비스 초기화 실패';
+        _serviceStatus = '준비 완료';
+      });
+    } catch (e) {
+      print('❌ 서버 데이터 동기화 실패: $e');
+      setState(() {
+        _isLoading = false;
+        _serviceStatus = '동기화 실패';
         _errorMessage = e.toString();
       });
     }
@@ -940,16 +904,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
           }
         } catch (_) {}
 
-        final analysis = await UnifiedAnalysisService.instance.analyzeStock(
-          code,
-          currentPrice: currentPrice,
-          prevClose: prevClose,
-          volume: volume,
-          highPrice: high,
-          lowPrice: low,
-          openPrice: open,
-          investmentStyle: InvestmentStyleManager().currentStyle,
-        );
+        final analysis = await UnifiedAnalysisService.instance.analyzeStock(code, days: 100);
         if (analysis == null) continue;
         final score = (analysis['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
         final priceForCache = (analysis['currentPrice'] as num?)?.toDouble() ?? currentPrice;
@@ -1093,11 +1048,11 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
         _serviceStatus = '데이터 새로고침 중...';
       });
       
-      await _loadMarketTopStocksParallel();
+      await _loadMarketTopStocksFromServer();
       
       setState(() {
         _isLoading = false;
-        _serviceStatus = '실시간 점수 계산 중';
+        _serviceStatus = '서버 점수 동기화 완료';
         _lastUpdateTime = DateTime.now().toString().substring(11, 19);
       });
       
@@ -1139,6 +1094,28 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
       } catch (e) {
         print('❌ 서비스 상태 모니터링 실패: $e');
       }
+    });
+  }
+
+  Future<void> _loadMarketTopStocksFromServer() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    // 서버에서 상위 10개 추천만 제공하므로, 시장 필터 없이 단일 목록을 먼저 표시
+    final items = await _functions.getTopRecommendations(uid: uid, limit: 10);
+    // 화면 구조 유지 위해 모두 NASDAQ 섹션에 배치(후속 단계에서 시장별 분리 가능)
+    setState(() {
+      _marketTopStocks['NASDAQ'] = items
+          .map((e) => TopStockItem(
+                stockCode: (e['symbol'] ?? e['id'] ?? '') as String,
+                stockName: (e['name'] ?? e['stockName'] ?? '') as String? ?? '',
+                market: 'NASDAQ',
+                score: (e['comprehensiveScore'] as num?)?.toDouble() ?? 0.0,
+                currentPrice: (e['currentPrice'] as num?)?.toDouble() ?? 0.0,
+                lastUpdated: DateTime.now(),
+              ))
+          .toList();
+      _marketTopStocks['KOSPI'] = [];
+      _marketTopStocks['KOSDAQ'] = [];
     });
   }
 
@@ -1969,13 +1946,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
                   // 3) 분석탭과 동일한 UnifiedAnalysis 호출
                   final analysisResult = await UnifiedAnalysisService.instance.analyzeStock(
                     stock.stockCode,
-                    currentPrice: currentPrice,
-                    prevClose: prevClose,
-                    volume: volume,
-                    highPrice: high,
-                    lowPrice: low,
-                    openPrice: open,
-                    investmentStyle: InvestmentStyleManager().currentStyle,
+                    days: 100,
                   );
                   if (analysisResult != null) {
                     final score = (analysisResult['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
