@@ -8,7 +8,7 @@ import '../../core/data/app_data_manager.dart';
 import '../../features/analysis/usecases/top_stocks_usecase.dart';
 import '../../features/analysis/models/top_stocks_state.dart';
 import '../../features/analysis/viewmodels/top_stocks_viewmodel.dart';
-import '../../core/api/kis_unified_api_service.dart';
+import '../../core/remote/remote_kis_service.dart';
 import '../../core/analysis/unified_analysis_service.dart';
 import '../../core/trading/investment_style_manager.dart';
 import '../../core/database/repositories/top_stocks_repository.dart';
@@ -860,7 +860,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
       // 순차로 부담을 줄이되, 적은 수이므로 빠르게 처리
       for (final code in codesToRefresh) {
         // 다이얼로그 새로고침과 동일 입력 준비
-        final priceData = await KisUnifiedApiService().getStockPrice(code);
+        final priceData = await RemoteKisService.instance.getCurrentPrice(code);
         final cached = AppDataManager.instance.getCachedStockData(code);
         double currentPrice = ((priceData?['currentPrice'] as num?)?.toDouble())
           ?? (cached['currentPrice'] as num?)?.toDouble()
@@ -896,7 +896,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
             print('📊 [추천종목] SQL DB에서 차트 데이터 사용: $code (${localChartData.length}개)');
           } else {
             // SQL DB에 없으면 API 호출
-            final chart = await KisUnifiedApiService().getDailyChart(code, count: 100);
+            final chart = await RemoteKisService.instance.getDailyChart(code, days: 100);
             if (chart.isNotEmpty) {
               AppDataManager.instance.cacheChartData(code, chart);
               print('📊 [추천종목] API에서 차트 데이터 사용: $code (${chart.length}개)');
@@ -1868,7 +1868,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
                     loaderShown = true;
                   } catch (_) {}
                   // 1) 분석탭과 완전히 동일한 데이터 수집 로직 사용 (실시간 API 우선)
-                  final Map<String, dynamic>? priceData = await KisUnifiedApiService().getStockPrice(stock.stockCode);
+                  final Map<String, dynamic>? priceData = await RemoteKisService.instance.getCurrentPrice(stock.stockCode);
                   final cached = AppDataManager.instance.getCachedStockData(stock.stockCode);
                   
                   // 분석탭과 동일한 데이터 추출 (API 우선, 캐시 폴백)
@@ -1906,7 +1906,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
                       print('📊 [추천종목] SQL DB에서 차트 데이터 사용: ${stock.stockCode} (${localChartData.length}개)');
                     } else {
                       // SQL DB에 없으면 API 호출
-                      final chartData = await KisUnifiedApiService().getDailyChart(stock.stockCode, count: 100);
+                      final chartData = await RemoteKisService.instance.getDailyChart(stock.stockCode, days: 100);
                       if (chartData.isNotEmpty) {
                         AppDataManager.instance.cacheChartData(stock.stockCode, chartData);
                         print('📊 [추천종목] API에서 차트 데이터 사용: ${stock.stockCode} (${chartData.length}개)');

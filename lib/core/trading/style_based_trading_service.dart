@@ -10,6 +10,7 @@ import 'volume_threshold_manager.dart';
 import 'market_time_validator.dart';
 import '../database/repositories/current_price_repository.dart';
 import '../api/kis_unified_api_service.dart';
+import '../remote/remote_kis_service.dart';
 
 // 투자 스타일별 파라미터 데이터 클래스 (7개 지표 시스템 기반)
 class TradingParameters {
@@ -2244,11 +2245,11 @@ class StyleBasedBacktester {
           
           if (isOverseasStock) {
             // 해외주식
-            currentPriceData = await unifiedApiService.getOverseasCurrentPrice(stockCode);
+            currentPriceData = await RemoteKisService.instance.getCurrentPrice(stockCode);
             print('🌍 $stockCode 해외주식 현재가 조회 (관심종목: $marketType)');
           } else {
             // 국내주식
-            currentPriceData = await unifiedApiService.getDomesticCurrentPrice(stockCode);
+            currentPriceData = await RemoteKisService.instance.getCurrentPrice(stockCode);
             print('🇰🇷 $stockCode 국내주식 현재가 조회 (관심종목: $marketType)');
           }
           
@@ -2261,17 +2262,16 @@ class StyleBasedBacktester {
           List<Map<String, dynamic>> chartData;
           if (isOverseasStock) {
             // 해외주식 (분석탭과 동일한 방식)
-            chartData = await unifiedApiService.getOverseasDailyChart(
-              symbol: stockCode,
-              exchangeCode: 'NAS',
-              count: 100,
+            chartData = await RemoteKisService.instance.getDailyChart(
+              stockCode,
+              days: 100,
             );
             print('🌍 $stockCode 해외주식 차트 데이터 조회 (관심종목: $marketType)');
           } else {
             // 국내주식 (분석탭과 동일한 방식)
-            chartData = await unifiedApiService.getDomesticDailyChart(
-              stockCode: stockCode,
-              count: 100,
+            chartData = await RemoteKisService.instance.getDailyChart(
+              stockCode,
+              days: 100,
             );
             print('🇰🇷 $stockCode 국내주식 차트 데이터 조회 (관심종목: $marketType)');
           }
@@ -2400,11 +2400,11 @@ class StyleBasedBacktester {
             
             if (isOverseasStock) {
               // 해외주식
-              currentPriceData = await unifiedApiService.getOverseasCurrentPrice(stockCode);
+              currentPriceData = await RemoteKisService.instance.getCurrentPrice(stockCode);
               print('🌍 $stockCode 재시도 해외주식 현재가 조회 (관심종목: $marketType)');
         } else {
               // 국내주식
-              currentPriceData = await unifiedApiService.getDomesticCurrentPrice(stockCode);
+              currentPriceData = await RemoteKisService.instance.getCurrentPrice(stockCode);
               print('🇰🇷 $stockCode 재시도 국내주식 현재가 조회 (관심종목: $marketType)');
             }
             
@@ -2414,17 +2414,16 @@ class StyleBasedBacktester {
             List<Map<String, dynamic>> chartData;
             if (isOverseasStock) {
               // 해외주식 (분석탭과 동일한 방식)
-              chartData = await unifiedApiService.getOverseasDailyChart(
-              symbol: stockCode,
-              exchangeCode: 'NAS',
-              count: 100,
+              chartData = await RemoteKisService.instance.getDailyChart(
+              stockCode,
+              days: 100,
             );
               print('🌍 $stockCode 재시도 해외주식 차트 데이터 조회 (관심종목: $marketType)');
             } else {
               // 국내주식 (분석탭과 동일한 방식)
-              chartData = await unifiedApiService.getDomesticDailyChart(
-              stockCode: stockCode,
-              count: 100,
+              chartData = await RemoteKisService.instance.getDailyChart(
+              stockCode,
+              days: 100,
             );
               print('🇰🇷 $stockCode 재시도 국내주식 차트 데이터 조회 (관심종목: $marketType)');
             }
@@ -2645,7 +2644,7 @@ class StyleBasedBacktester {
           
           // 1. 실시간 현재가 조회 (분석탭과 동일)
           print('📊 $stockCode 실시간 현재가 요청 중...');
-          final realtimeData = await unifiedApiService.getDomesticCurrentPrice(stockCode);
+          final realtimeData = await RemoteKisService.instance.getCurrentPrice(stockCode);
           if (realtimeData != null) {
             print('📊 $stockCode 실시간 데이터: $realtimeData');
           } else {
@@ -2654,9 +2653,9 @@ class StyleBasedBacktester {
           
           // 2. 기간별 차트 데이터 조회 (분석탭과 동일)
           print('📊 $stockCode 기간별 차트 데이터 요청 중... (일별)');
-          final dailyData = await unifiedApiService.getDomesticDailyChart(
-            stockCode: stockCode,
-              count: 100,
+          final dailyData = await RemoteKisService.instance.getDailyChart(
+            stockCode,
+            days: 100,
           );
           print('📊 $stockCode 기간별 차트 데이터: ${dailyData.length}개');
           

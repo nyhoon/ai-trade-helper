@@ -6,7 +6,7 @@ import '../database/repositories/current_price_repository.dart';
 import '../database/repositories/holdings_repository.dart';
 import '../database/repositories/recommended_stocks_repository.dart';
 import '../data/app_data_manager.dart';
-import '../api/kis_unified_api_service.dart';
+import '../remote/remote_kis_service.dart';
 import '../constants/chart_constants.dart';
 import '../trading/investment_style.dart';
 import '../trading/investment_style_manager.dart';
@@ -54,7 +54,7 @@ class AiRecommendationService {
   final Set<String> _marketLogOnce = <String>{};
   
   // 통일된 API 서비스
-  final KisUnifiedApiService _unifiedApiService = KisUnifiedApiService();
+  // 제거: 로컬 KIS 서비스 의존성 (서버 프록시 사용)
 
   final RecommendedStocksRepository _recommendedStocksRepo = RecommendedStocksRepository();
   final LocalNotificationManager _notifier = LocalNotificationManager();
@@ -248,7 +248,7 @@ class AiRecommendationService {
         final market = _getMarketFromSymbol(symbol);
         if (market == 'NASDAQ') {
           // 분석/자동매매와 동일한 해외 전용 API 사용 (통일된 API 서비스)
-          return _unifiedApiService.getOverseasDailyChart(symbol: symbol, exchangeCode: 'NAS', count: ChartConstants.CHART_MIN_BARS);
+          return RemoteKisService.instance.getDailyChart(symbol, days: ChartConstants.CHART_MIN_BARS);
         }
         // 국내: 일별 차트 60개 강제 확보
         return _fetchDomesticDailyChartData(symbol, minCount: ChartConstants.CHART_MIN_BARS);
@@ -319,7 +319,7 @@ class AiRecommendationService {
     try {
       // 1차 시도: 표준 일봉 API (통일된 API 서비스)
       List<Map<String, dynamic>> data = await _retry(
-        () => _unifiedApiService.getDomesticDailyChart(stockCode: symbol, count: minCount),
+        () => RemoteKisService.instance.getDailyChart(symbol, days: minCount),
         retries: 3,
         initialDelay: const Duration(milliseconds: 300),
       );
@@ -327,7 +327,7 @@ class AiRecommendationService {
 
       // 2차 시도: Raw API 대체 호출 (폴백용 - 통일된 API 서비스 실패 시에만 사용)
       final raw = await _retry(
-        () => _unifiedApiService.getDomesticDailyChart(stockCode: symbol, count: minCount),
+        () => RemoteKisService.instance.getDailyChart(symbol, days: minCount),
         retries: 3,
         initialDelay: const Duration(milliseconds: 300),
       );
@@ -541,12 +541,12 @@ class AiRecommendationService {
           if (_getMarketFromSymbol(symbol) == 'NASDAQ') {
             // 나스닥 종목: 해외 전용 차트 API (실패 시 현재가 API로 대체) - 통일된 API 서비스
             print('📊 [AI 추천] $symbol 나스닥 종목, 해외 주식 차트 데이터 수집 시도...');
-            chartData = await _retry(() => _unifiedApiService.getOverseasDailyChart(symbol: symbol, exchangeCode: 'NAS', count: ChartConstants.CHART_MIN_BARS), retries: 3, initialDelay: const Duration(milliseconds: 300));
+            chartData = await _retry(() => RemoteKisService.instance.getDailyChart(symbol, days: ChartConstants.CHART_MIN_BARS), retries: 3, initialDelay: const Duration(milliseconds: 300));
             
             // 차트 데이터가 없으면 현재가 API로 기본 데이터 생성
             if (chartData.isEmpty) {
               print('📊 [AI 추천] $symbol 차트 데이터 없음, 현재가 API로 기본 데이터 생성...');
-              final currentPriceData = await _retry(() => _unifiedApiService.getOverseasStockPrice(symbol: symbol, exchangeCode: 'NAS'), retries: 3, initialDelay: const Duration(milliseconds: 300));
+              final currentPriceData = await _retry(() => RemoteKisService.instance.getCurrentPrice(symbol), retries: 3, initialDelay: const Duration(milliseconds: 300));
               
               if (currentPriceData != null && currentPriceData.isNotEmpty) {
                 final currentPrice = _parseDouble(currentPriceData['currentPrice']);
@@ -985,19 +985,19 @@ class AiRecommendationService {
             print('✅ [AI 추천] $symbol 로컬DB에서 현재가 복구: ${currentPrice['currentPrice']}');
           } else {
             print('❌ [AI 추천] $symbol 로컬DB에도 유효한 현재가 없음, API 재호출 필요');
-            // API에서 현재가를 다시 가져오기 (통일된 API 서비스)
+            // API에서 현재가를 다시 가져오기 (서버 프록시)
             try {
-              final data = await _retry(() => _unifiedApiService.getStockPrice(symbol), retries: 3, initialDelay: const Duration(milliseconds: 300));
+              final data = await _retry(() => RemoteKisService.instance.getCurrentPrice(symbol), retries: 3, initialDelay: const Duration(milliseconds: 300));
               if (data != null && data.isNotEmpty) {
-                final apiCurrentPrice = _parseDouble(data['stck_prpr']);
+                final apiCurrentPrice = _parseDouble(data['current_price'] ?? data['prpr']);
                 if (apiCurrentPrice > 0) {
                   currentPrice = {
                     'currentPrice': apiCurrentPrice,
-                    'prevClose': _parseDouble(data['stck_prdy_clpr']),
-                    'volume': _parseInt(data['acml_vol']),
-                    'highPrice': _parseDouble(data['stck_hgpr']),
-                    'lowPrice': _parseDouble(data['stck_lwpr']),
-                    'openPrice': _parseDouble(data['stck_oprc']),
+                    'prevClose': _parseDouble(data['prev_close'] ?? data['stck_prdy_clpr']),
+                    'volume': _parseInt(data['volume'] ?? data['acml_vol']),
+                    'highPrice': _parseDouble(data['high_price'] ?? data['stck_hgpr']),
+                    'lowPrice': _parseDouble(data['low_price'] ?? data['stck_lwpr']),
+                    'openPrice': _parseDouble(data['open_price'] ?? data['stck_oprc']),
                   };
                   print('✅ [AI 추천] $symbol API에서 현재가 복구: ${currentPrice['currentPrice']}');
                 }

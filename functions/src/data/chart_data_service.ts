@@ -1,4 +1,5 @@
 import * as admin from 'firebase-admin';
+import { KISProxy } from './kis_proxy';
 
 /**
  * 차트 데이터 서비스
@@ -68,6 +69,23 @@ export class ChartDataService {
   }
 
   /**
+   * 차트 데이터 확보 보장: 부족하면 KIS에서 받아와 저장 후 재조회
+   */
+  static async ensureChartData(symbol: string, days: number = 100): Promise<any[]> {
+    const cur = await this.getChartData(symbol, days);
+    if (Array.isArray(cur) && cur.length >= days) return cur;
+    try {
+      const fetched = await KISProxy.fetchDailyChart(symbol, days);
+      if (Array.isArray(fetched) && fetched.length > 0) {
+        await this.saveChartData(symbol, fetched);
+      }
+    } catch (e) {
+      console.error(`❌ KIS 차트 확보 실패: ${symbol}`, e);
+    }
+    return await this.getChartData(symbol, days);
+  }
+
+  /**
    * 현재가 데이터 조회
    * @param symbol 종목코드
    * @returns 현재가 데이터
@@ -94,6 +112,25 @@ export class ChartDataService {
       console.error(`❌ 현재가 데이터 조회 실패: ${symbol}`, error);
       return null;
     }
+  }
+
+  /**
+   * 현재가 확보 보장: 없거나 오래되면 KIS에서 받아와 저장
+   */
+  static async ensureCurrentPrice(symbol: string, freshnessMs: number = 60_000): Promise<any> {
+    const cur = await this.getCurrentPrice(symbol);
+    const now = Date.now();
+    const ts = (cur?.timestamp as number) ?? 0;
+    if (cur && now - ts < freshnessMs) return cur;
+    try {
+      const fetched = await KISProxy.fetchCurrentPrice(symbol);
+      if (fetched) {
+        await this.saveCurrentPrice(symbol, fetched);
+      }
+    } catch (e) {
+      console.error(`❌ KIS 현재가 확보 실패: ${symbol}`, e);
+    }
+    return await this.getCurrentPrice(symbol);
   }
 
   /**

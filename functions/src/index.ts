@@ -51,8 +51,8 @@ export const analyzeStock = onCall<{ symbol: string; days?: number; buyThreshold
     }
 
     const [chartData, currentPrice] = await Promise.all([
-      ChartDataService.getChartData(symbol, days),
-      ChartDataService.getCurrentPrice(symbol),
+      ChartDataService.ensureChartData(symbol, 100),
+      ChartDataService.ensureCurrentPrice(symbol),
     ]);
 
     const now = new Date();
@@ -74,6 +74,30 @@ export const analyzeStock = onCall<{ symbol: string; days?: number; buyThreshold
   }
 );
 
+// 차트 프록시(100일 보장)
+export const getDailyChart = onCall<{ symbol: string; days?: number }>(
+  { region: "asia-northeast3", memory: "256MiB", timeoutSeconds: 60 },
+  async (request) => {
+    const symbol = request.data?.symbol;
+    const days = request.data?.days ?? 100;
+    if (!symbol) throw new Error("symbol is required");
+    const rows = await ChartDataService.ensureChartData(symbol, Math.max(1, Math.min(500, days)));
+    return { symbol, count: rows.length, items: rows };
+  }
+);
+
+// 현재가 프록시(최신 보장)
+export const getCurrentPrice = onCall<{ symbol: string }>(
+  { region: "asia-northeast3", memory: "256MiB", timeoutSeconds: 60 },
+  async (request) => {
+    const symbol = request.data?.symbol;
+    if (!symbol) throw new Error("symbol is required");
+    const price = await ChartDataService.ensureCurrentPrice(symbol);
+    if (!price) return { symbol, hasData: false };
+    return { symbol, hasData: true, data: price };
+  }
+);
+
 // 다중 종목 분석
 export const analyzeMultipleStocks = onCall<{ symbols: string[]; days?: number }>(
   { region: "asia-northeast3", memory: "256MiB", timeoutSeconds: 60 },
@@ -84,14 +108,17 @@ export const analyzeMultipleStocks = onCall<{ symbols: string[]; days?: number }
       throw new Error("symbols must be a non-empty array");
     }
 
-    const chartDataMap = await ChartDataService.getMultipleChartData(symbols, days);
+    const chartDataMap = await ChartDataService.getMultipleChartData(symbols, 100);
     const now = new Date();
     const currentTime = now.toTimeString().slice(0, 5);
 
     const results = await Promise.all(
       symbols.map(async (symbol) => {
-        const chartData = chartDataMap[symbol] ?? [];
-        const currentPrice = await ChartDataService.getCurrentPrice(symbol);
+        const chartData = chartDataMap[symbol] ?? await ChartDataService.ensureChartData(symbol, 100);
+        const currentPrice = await ChartDataService.ensureCurrentPrice(symbol);
+        if (!Array.isArray(chartData) || chartData.length < 60 || !currentPrice) {
+          return null;
+        }
         const result = await ComprehensiveIndicatorCalculator.calculateComprehensiveScore({
           symbol,
           chartData,
@@ -103,7 +130,8 @@ export const analyzeMultipleStocks = onCall<{ symbols: string[]; days?: number }
       })
     );
 
-    return { count: results.length, results };
+    const filtered = results.filter((r) => r !== null);
+    return { count: filtered.length, results: filtered };
   }
 );
 
@@ -124,8 +152,11 @@ export const analyzeWatchlist = onCall<{ uid: string; days?: number }>(
     const currentTime = now.toTimeString().slice(0, 5);
 
     const results = await Promise.all(symbols.map(async (symbol) => {
-      const chartData = chartDataMap[symbol] ?? [];
-      const currentPrice = await ChartDataService.getCurrentPrice(symbol);
+      const chartData = chartDataMap[symbol] ?? await ChartDataService.ensureChartData(symbol, 100);
+      const currentPrice = await ChartDataService.ensureCurrentPrice(symbol);
+      if (!Array.isArray(chartData) || chartData.length < 60 || !currentPrice) {
+        return null;
+      }
       const result = await ComprehensiveIndicatorCalculator.calculateComprehensiveScore({
         symbol, chartData, currentPrice, currentTime,
       });
@@ -134,7 +165,8 @@ export const analyzeWatchlist = onCall<{ uid: string; days?: number }>(
       return result;
     }));
 
-    return { count: results.length, results };
+    const filtered = results.filter((r) => r !== null);
+    return { count: filtered.length, results: filtered };
   }
 );
 
@@ -155,8 +187,11 @@ export const analyzeHoldings = onCall<{ uid: string; days?: number }>(
     const currentTime = now.toTimeString().slice(0, 5);
 
     const results = await Promise.all(symbols.map(async (symbol) => {
-      const chartData = chartDataMap[symbol] ?? [];
-      const currentPrice = await ChartDataService.getCurrentPrice(symbol);
+      const chartData = chartDataMap[symbol] ?? await ChartDataService.ensureChartData(symbol, 100);
+      const currentPrice = await ChartDataService.ensureCurrentPrice(symbol);
+      if (!Array.isArray(chartData) || chartData.length < 60 || !currentPrice) {
+        return null;
+      }
       const result = await ComprehensiveIndicatorCalculator.calculateComprehensiveScore({
         symbol, chartData, currentPrice, currentTime,
       });
@@ -165,7 +200,8 @@ export const analyzeHoldings = onCall<{ uid: string; days?: number }>(
       return result;
     }));
 
-    return { count: results.length, results };
+    const filtered = results.filter((r) => r !== null);
+    return { count: filtered.length, results: filtered };
   }
 );
 
@@ -181,7 +217,14 @@ export const getTopRecommendations = onCall<{ uid: string; limit?: number }>(
       .collection("users").doc(uid)
       .collection("analysis").get();
     const items = analysisSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }))
-      .filter(r => typeof r.comprehensiveScore === "number");
+      .filter(r => typeof r.comprehensiveScore === "number")
+      .filter(r => {
+        try {
+          const ind = r.individualScores || {};
+          const sumAbs = Object.values(ind).reduce((acc: number, v: any) => acc + Math.abs(Number(v || 0)), 0);
+          return sumAbs > 0.01;
+        } catch (_) { return false; }
+      });
     items.sort((a, b) => (b.comprehensiveScore ?? 0) - (a.comprehensiveScore ?? 0));
     const top = items.slice(0, limit);
 
@@ -192,6 +235,33 @@ export const getTopRecommendations = onCall<{ uid: string; limit?: number }>(
         items: top,
       }, { merge: true });
 
-    return { count: top.length, items: top };
+    // 시장별 Top10 저장 (가능한 경우)
+    // 시장 정보는 stock_master/{symbol}.market 또는 prices/{symbol}.market에서 조회
+    const markets: Record<string, any[]> = {};
+    for (const it of top) {
+      let market: string | undefined = it.market;
+      if (!market) {
+        const m1 = await admin.firestore().collection('stock_master').doc(it.id).get();
+        market = (m1.data() as any)?.market;
+        if (!market) {
+          const p1 = await admin.firestore().collection('prices').doc(it.id).get();
+          market = (p1.data() as any)?.market;
+        }
+      }
+      if (!market) continue;
+      if (!markets[market]) markets[market] = [];
+      markets[market].push(it);
+    }
+
+    const recCol = admin.firestore().collection('users').doc(uid).collection('recommendations').doc('markets');
+    const batch = admin.firestore().batch();
+    const nowTs = Date.now();
+    for (const [market, list] of Object.entries(markets)) {
+      const ordered = [...list].sort((a, b) => (b.comprehensiveScore ?? 0) - (a.comprehensiveScore ?? 0)).slice(0, limit);
+      batch.set(recCol.collection(String(market)).doc('top10'), { updatedAt: nowTs, limit, items: ordered }, { merge: true });
+    }
+    await batch.commit();
+
+    return { count: top.length, items: top, markets: Object.keys(markets) };
   }
 );

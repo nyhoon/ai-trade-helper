@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'package:sqflite/sqflite.dart';
-import '../api/kis_unified_api_service.dart';
+import '../remote/remote_kis_service.dart';
 import '../database/repositories/watchlist_repository.dart';
 import '../database/repositories/holdings_repository.dart';
 import '../database/repositories/realtime_data_repository.dart';
@@ -18,7 +18,6 @@ class UnifiedStockDataManager {
   UnifiedStockDataManager._();
 
   // 의존성 주입
-  final KisUnifiedApiService _unifiedApiService = KisUnifiedApiService();
   final WatchlistRepository _watchlistRepo = WatchlistRepository();
   final HoldingsRepository _holdingsRepo = HoldingsRepository();
   final RealtimeDataRepository _realtimeRepo = RealtimeDataRepository();
@@ -101,12 +100,7 @@ class UnifiedStockDataManager {
   Future<void> _updateCurrentPriceInBackground(String stockCode) async {
     try {
       // API에서 현재가 조회
-      Map<String, dynamic>? apiData;
-      if (_isNasdaqStock(stockCode)) {
-        apiData = await _unifiedApiService.getOverseasCurrentPrice(stockCode);
-      } else {
-        apiData = await _unifiedApiService.getDomesticCurrentPrice(stockCode);
-      }
+      final Map<String, dynamic>? apiData = await RemoteKisService.instance.getCurrentPrice(stockCode);
 
       if (apiData != null && apiData.isNotEmpty) {
         // 로컬 DB에 저장
@@ -212,12 +206,7 @@ class UnifiedStockDataManager {
       print('🔍 현재가 데이터 조회 시작: $stockCode');
       
       // 1. 항상 API에서 최신 데이터 조회 (분석탭 진입 시)
-      Map<String, dynamic>? apiData;
-      if (_isNasdaqStock(stockCode)) {
-        apiData = await _unifiedApiService.getOverseasCurrentPrice(stockCode);
-      } else {
-        apiData = await _unifiedApiService.getDomesticCurrentPrice(stockCode);
-      }
+      Map<String, dynamic>? apiData = await RemoteKisService.instance.getCurrentPrice(stockCode);
 
       if (apiData != null && apiData.isNotEmpty) {
         print('✅ API 데이터 조회 성공: $stockCode');
@@ -259,9 +248,9 @@ class UnifiedStockDataManager {
       
       // 1. 항상 API에서 최신 차트 데이터 조회 (분석탭 진입 시)
       // 통합 API 사용으로 자동 시장 판별 및 적절한 exchangeCode 선택
-      List<Map<String, dynamic>> apiData = await _unifiedApiService.getDailyChart(
+      List<Map<String, dynamic>> apiData = await RemoteKisService.instance.getDailyChart(
         stockCode,
-        count: 100,
+        days: 100,
       );
 
       if (apiData.isNotEmpty) {

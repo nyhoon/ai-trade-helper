@@ -1,3 +1,4 @@
+import '../remote/remote_kis_service.dart';
 import 'dart:async';
 import '../data/app_data_manager.dart';
 import '../database/repositories/signal_history_repository.dart';
@@ -532,7 +533,7 @@ class AutoTradingCycle {
               // 로컬DB에 없을 때만 API 호출 (폴백)
               // 통일된 API 서비스로 차트 데이터 조회
               print('📈 차트 데이터 조회: $stockCode');
-              chartData = await _unifiedApiService.getDailyChart(stockCode, count: 100);
+              chartData = await RemoteKisService.instance.getDailyChart(stockCode, days: 100);
             }
             
             print('📊 차트 데이터 조회 결과: $stockCode - ${chartData.length}개');

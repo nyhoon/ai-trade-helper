@@ -12,6 +12,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import '../../core/api/kis_unified_api_service.dart';
+import '../../core/remote/remote_kis_service.dart';
 import '../../core/remote/analysis_functions_service.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../../core/data/app_data_manager.dart';
@@ -883,7 +884,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
         
         // 차트 데이터도 조회 (일봉 데이터) - 통일된 API 서비스 사용
         try {
-          List<Map<String, dynamic>> chartData = await _unifiedApiService.getDailyChart(stockCode, count: 100);
+          List<Map<String, dynamic>> chartData = await RemoteKisService.instance.getDailyChart(stockCode, days: 100);
           
           if (chartData.isNotEmpty) {
             // 로컬 DB에 저장 (upsertDailyBars 사용)
@@ -1656,7 +1657,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
       _currentPrices.remove(stockCode);
       
       // 2. API에서 최신 데이터 조회 (캐시 완전 무시) - 추천종목과 동일한 방식
-      Map<String, dynamic>? realtimeData = await _unifiedApiService.getStockPrice(stockCode);
+      Map<String, dynamic>? realtimeData = await RemoteKisService.instance.getCurrentPrice(stockCode);
 
       if (realtimeData != null && realtimeData.isNotEmpty) {
         print('🔍 [AnalysisScreen] 실시간 데이터 원본: $realtimeData');
@@ -1755,7 +1756,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
       }
 
       // 2. API에서 차트 데이터 조회 (여유 있게 요청)
-      List<Map<String, dynamic>> chartData = await _unifiedApiService.getDailyChart(stockCode, count: 100);
+      List<Map<String, dynamic>> chartData = await RemoteKisService.instance.getDailyChart(stockCode, days: 100);
 
       if (chartData.isNotEmpty) {
         print('🔍 [AnalysisScreen] 차트 데이터 원본 (첫 3개): ${chartData.take(3).toList()}');
@@ -3286,7 +3287,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
       // 3. 시장별 차트 데이터 조회 (통일된 API 서비스 사용)
       List<Map<String, dynamic>> rawKisData = [];
       try {
-        rawKisData = await _unifiedApiService.getDailyChart(stockCode, count: 100);
+        rawKisData = await RemoteKisService.instance.getDailyChart(stockCode, days: 100);
         print('📊 차트 데이터 조회 ($stockCode): ${rawKisData.length}개');
         
         if (rawKisData.isNotEmpty) {
