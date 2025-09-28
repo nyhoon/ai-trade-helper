@@ -1,22 +1,26 @@
 import '../../../core/api/kis_unified_api_service.dart';
 import '../../../core/data/unified_stock_data_manager.dart';
+import '../../../core/database/repositories/holdings_repository.dart';
+import '../../../core/remote/remote_kis_service.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 /// 보유종목 데이터 로드 UseCase
 /// Domain 계층의 비즈니스 로직을 담당
 class LoadHoldingsDataUseCase {
   final KisUnifiedApiService _apiService;
   final UnifiedStockDataManager _dataManager;
+  final HoldingsRepository _holdingsRepo = HoldingsRepository();
 
   LoadHoldingsDataUseCase(
     this._apiService,
     this._dataManager,
   );
 
-  /// 보유종목 데이터 로드 실행
+  /// 보유종목 데이터 로드 실행 (서버 주도: Firestore → Functions)
   Future<List<Map<String, dynamic>>> execute() async {
     try {
-      // 1. 보유종목 조회
-      final holdings = await _apiService.getPositionsCompat();
+      // 1) Firestore에서 보유종목 조회 (서버 주도)
+      final holdings = await _holdingsRepo.getAllHoldings();
       
       print('🔍 [LoadHoldingsUseCase] API에서 받은 보유종목 개수: ${holdings.length}');
       for (int i = 0; i < holdings.length; i++) {
@@ -31,23 +35,34 @@ class LoadHoldingsDataUseCase {
         return [];
       }
 
-      // 2. 종목 심볼 추출 및 정규화 (stockCode 또는 pdno 지원)
+      // 2) 종목 심볼 추출 및 정규화 (stockCode 또는 pdno 지원)
       final symbols = holdings
           .map((item) => _normalizeSymbol(item['stockCode'] ?? item['pdno']))
           .where((symbol) => symbol != null && symbol!.isNotEmpty)
           .cast<String>()
           .toList();
       
-      // 3. 현재가 데이터 조회 (API 자동 판별 + 폴백에 위임)
+      // 3) 현재가 데이터 조회 (서버 Functions 경유)
       final Map<String, Map<String, dynamic>> currentPrices = {};
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
       for (final symbol in symbols) {
-        final priceData = await _apiService.getStockPrice(symbol);
-        if (priceData != null) {
-          currentPrices[symbol] = priceData;
+        await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: symbol);
+        final price = await RemoteKisService.instance.getCurrentPrice(symbol, uid: uid);
+        if (price != null && price.isNotEmpty) {
+          // 표준화
+          currentPrices[symbol] = {
+            'prpr': RemoteKisService.asDouble(price['currentPrice']),
+            'stck_prdy_clpr': RemoteKisService.asDouble(price['prevClose']),
+            'acml_vol': RemoteKisService.asInt(price['volume']),
+            'open': RemoteKisService.asDouble(price['open'] ?? price['openPrice']),
+            'high': RemoteKisService.asDouble(price['high'] ?? price['highPrice']),
+            'low': RemoteKisService.asDouble(price['low'] ?? price['lowPrice']),
+            'stockName': (price['stockName'] ?? '').toString(),
+          };
         }
       }
       
-      // 4. 데이터 통합
+      // 4) 데이터 통합
       final List<Map<String, dynamic>> result = [];
       
       for (final holding in holdings) {
@@ -70,9 +85,7 @@ class LoadHoldingsDataUseCase {
           // UI 및 다른 파이프라인과 키 일치
           'symbol': symbol,
           'name': resolvedName,
-          'currentPrice': priceData?['prpr'],
-          'change': priceData?['diff'],
-          'changeRate': priceData?['rate'],
+          'currentPrice': (priceData?['prpr'] as num?)?.toDouble(),
           'volume': priceData?['acml_vol'],
           'quantity': holding['hldg_qty'],
           'avgPrice': holding['pchs_avg_pric'],

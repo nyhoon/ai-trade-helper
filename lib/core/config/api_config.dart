@@ -117,12 +117,22 @@ class ApiConfig {
     }
   }
 
-  /// 기본 설정 로드 (개발용)
+  /// 기본 설정 로드 (개발용) - 주석/공백 안전 파싱
   Future<void> _loadDefaultConfig() async {
     try {
       // assets/config/api_config.json에서 로드 시도
-      final jsonString = await rootBundle.loadString('assets/config/api_config.json');
-      final config = json.decode(jsonString);
+      final raw = await rootBundle.loadString('assets/config/api_config.json');
+      final cleaned = _stripJsonComments(raw);
+      if (cleaned.isEmpty) {
+        // 빈 파일이면 기본값 유지(서버 저장 경로 사용)
+        _appKey = null;
+        _appSecret = null;
+        _accountNo = null;
+        _isReal = true;
+        print('ℹ️ 기본 설정 파일이 비어있음: 서버 저장 경로 사용 예정');
+        return;
+      }
+      final config = json.decode(cleaned) as Map<String, dynamic>;
       
       _appKey = config['app_key'];
       _appSecret = config['app_secret'];
@@ -140,6 +150,21 @@ class ApiConfig {
       
       print('⚠️ API 키가 설정되지 않음 - 사용자 입력 필요');
     }
+  }
+
+  /// JSON 문자열에서 라인/블록 주석 제거 및 BOM/공백 정리
+  String _stripJsonComments(String input) {
+    // 제거: UTF-8 BOM
+    var s = input.replaceFirst(RegExp(r'^\uFEFF'), '');
+    // 제거: \r
+    s = s.replaceAll('\r', '');
+    // 제거: /* ... */ 블록 주석 (멀티라인)
+    s = s.replaceAll(RegExp(r"/\*[\s\S]*?\*/"), '');
+    // 제거: // ... 라인 주석
+    s = s.replaceAllMapped(RegExp(r"(^|\n)\s*//.*"), (m) => m.group(1) ?? '');
+    // 앞뒤 공백 정리
+    s = s.trim();
+    return s;
   }
 
   /// API 설정 저장

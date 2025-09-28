@@ -277,15 +277,15 @@ class RealtimeAnalysisEngine {
         'stock_code': stockCode,
         'stock_name': stockName,
         'analysis_time': DateTime.now().millisecondsSinceEpoch,
-        'comprehensive_score': comprehensiveResult['comprehensiveScore'] as double? ?? 0.0,
+        'comprehensive_score': (comprehensiveResult['comprehensiveScore'] as num?)?.toDouble() ?? 0.0,
         'trading_decision': comprehensiveResult['tradingDecision'] as String? ?? 'HOLD',
         'signal_strength': comprehensiveResult['signalStrength'] as String? ?? 'WEAK',
         'confidence_score': _calculateConfidenceScore(comprehensiveResult),
-        'target_price': _calculateTargetPrice(currentPrice['current_price'] as double, comprehensiveResult),
+        'target_price': _calculateTargetPrice((currentPrice['current_price'] as num?)?.toDouble() ?? 0.0, comprehensiveResult),
         'analysis_details': comprehensiveResult,
-        'current_price': currentPrice['current_price'] as double,
-        'prev_close': currentPrice['prev_close'] as double,
-        'change_rate': currentPrice['change_rate'] as double,
+        'current_price': (currentPrice['current_price'] as num?)?.toDouble() ?? 0.0,
+        'prev_close': (currentPrice['prev_close'] as num?)?.toDouble() ?? 0.0,
+        'change_rate': (currentPrice['change_rate'] as num?)?.toDouble() ?? 0.0,
       };
       
       return analysisResult;
@@ -300,11 +300,13 @@ class RealtimeAnalysisEngine {
   Future<Map<String, dynamic>> _prepareIndicatorData(List<Map<String, dynamic>> chartData, Map<String, dynamic> currentPrice) async {
     try {
       // OHLCV 데이터 추출
-      final closes = chartData.map((d) => d['close'] as double).toList();
-      final opens = chartData.map((d) => d['open'] as double).toList();
-      final highs = chartData.map((d) => d['high'] as double).toList();
-      final lows = chartData.map((d) => d['low'] as double).toList();
-      final volumes = chartData.map((d) => d['volume'] as int).toList();
+      double _pd(dynamic v) => v is num ? v.toDouble() : double.tryParse(v.toString()) ?? 0.0;
+      int _pi(dynamic v) => v is num ? v.toInt() : int.tryParse(v.toString()) ?? 0;
+      final closes = chartData.map((d) => _pd(d['close'])).toList();
+      final opens = chartData.map((d) => _pd(d['open'])).toList();
+      final highs = chartData.map((d) => _pd(d['high'])).toList();
+      final lows = chartData.map((d) => _pd(d['low'])).toList();
+      final volumes = chartData.map((d) => _pi(d['volume'])).toList();
       
       return {
         'closes': closes,
@@ -312,10 +314,10 @@ class RealtimeAnalysisEngine {
         'highs': highs,
         'lows': lows,
         'volumes': volumes,
-        'current_price': currentPrice['current_price'] as double,
-        'prev_close': currentPrice['prev_close'] as double,
-        'change_rate': currentPrice['change_rate'] as double,
-        'volume': currentPrice['volume'] as int,
+        'current_price': (currentPrice['current_price'] as num?)?.toDouble() ?? 0.0,
+        'prev_close': (currentPrice['prev_close'] as num?)?.toDouble() ?? 0.0,
+        'change_rate': (currentPrice['change_rate'] as num?)?.toDouble() ?? 0.0,
+        'volume': (currentPrice['volume'] as num?)?.toInt() ?? 0,
       };
       
     } catch (e) {

@@ -584,7 +584,7 @@ class RecommendedStocksBackgroundService {
     _pendingSaves.clear();
     try {
       // SQL 단일화: SharedPreferences 제거, SQL만 사용
-      final topRepo = TopStocksRepository();
+      // 서버 전환: 클라이언트 top_stocks 접근 제거
       final toSave = <Map<String, dynamic>>[];
       for (final s in saves) {
         final code = s['stockCode'] as String;
@@ -610,8 +610,8 @@ class RecommendedStocksBackgroundService {
         // 비동기 배치 저장으로 트랜잭션 락 최소화 (지연 실행)
         Future.delayed(const Duration(milliseconds: 50), () async {
           try {
-            await topRepo.saveManyTopStocks(toSave);
-            print('📊 SQL 배치 저장 완료: ${toSave.length}개');
+            // 저장 스킵 (서버 Functions 전용)
+            print('📊 배치 점수 계산 완료(서버 저장 스킵): ${toSave.length}개');
           } catch (e) {
             print('⚠️ SQL 배치 저장 실패: $e');
           }

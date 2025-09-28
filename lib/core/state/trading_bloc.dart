@@ -4,7 +4,8 @@ import '../data/app_data_manager.dart';
 import '../analysis/unified_analysis_service.dart';
 import '../trading/investment_style_manager.dart';
 import '../trading/investment_style.dart';
-import '../api/kis_unified_api_service.dart';
+import '../remote/remote_kis_service.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 // Events
 abstract class TradingEvent {}
@@ -50,7 +51,7 @@ class TradingError extends TradingState {
 // Bloc
 class TradingBloc extends Bloc<TradingEvent, TradingState> {
   final AppDataManager _appDataManager;
-  final KisUnifiedApiService _unifiedApiService;
+  // 서버 전환: 통일API 제거
   final UnifiedAnalysisService _unifiedAnalysis = UnifiedAnalysisService.instance;
   final InvestmentStyleManager _styleManager = InvestmentStyleManager();
   
@@ -60,9 +61,7 @@ class TradingBloc extends Bloc<TradingEvent, TradingState> {
 
   TradingBloc({
     required AppDataManager appDataManager,
-    required KisUnifiedApiService unifiedApiService,
   }) : _appDataManager = appDataManager,
-       _unifiedApiService = unifiedApiService,
        super(TradingInitial()) {
     on<LoadStockData>(_onLoadStockData);
     on<RefreshTradingData>(_onRefreshTradingData);
@@ -142,26 +141,30 @@ class TradingBloc extends Bloc<TradingEvent, TradingState> {
       final cachedData = _appDataManager.getCachedStockData(stockCode);
       if (cachedData.isNotEmpty) {
         print('📊 TradingBloc: 캐시된 데이터 사용 - $stockCode');
-        return cachedData;
+        // 표준 스키마로 정규화 후 반환 (int/double 안전 변환)
+        return _normalizePriceData(stockCode, cachedData);
       }
       
-      print('📊 TradingBloc: API에서 데이터 조회 - $stockCode');
+      print('📊 TradingBloc: API에서 데이터 조회(서버) - $stockCode');
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+      await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
+      final stockPrice = await RemoteKisService.instance.getCurrentPrice(stockCode, uid: uid);
       
-      // 확장 API의 자동 판별 메서드 사용
-      final stockData = await _unifiedApiService.getStockPriceAuto(stockCode);
-      
-      if (stockData != null && stockData.isNotEmpty) {
+      if (stockPrice != null && stockPrice.isNotEmpty) {
         print('📊 TradingBloc: API 데이터 조회 성공 - $stockCode');
-        print('  - 현재가: ${stockData['prpr']}');
-        print('  - 시가: ${stockData['open']}');
-        print('  - 고가: ${stockData['high']}');
-        print('  - 저가: ${stockData['low']}');
-        print('  - 거래량: ${stockData['acml_vol']}');
+        print('  - 현재가: ${stockPrice['currentPrice']}');
+        print('  - 시가: ${stockPrice['open'] ?? stockPrice['openPrice']}');
+        print('  - 고가: ${stockPrice['high'] ?? stockPrice['highPrice']}');
+        print('  - 저가: ${stockPrice['low'] ?? stockPrice['lowPrice']}');
+        print('  - 거래량: ${stockPrice['volume']}');
+        
+        // 표준 스키마로 정규화 (UI가 기대하는 키 포함: currentPrice/prpr 등)
+        final normalized = _normalizePriceData(stockCode, stockPrice);
         
         // 캐시에 저장
-        _appDataManager.updateCurrentPrice(stockCode, stockData);
+        _appDataManager.updateCurrentPrice(stockCode, normalized);
         
-        return stockData;
+        return normalized;
       } else {
         print('⚠️ TradingBloc: API 데이터가 비어있음 - $stockCode');
         return {};
@@ -177,45 +180,63 @@ class TradingBloc extends Bloc<TradingEvent, TradingState> {
     try {
       print('📊 TradingBloc: 사일런트 현재가 데이터 로드 - $stockCode');
       
-      // 1. 캐시된 데이터 우선 확인
+      // 1. 캐시된 데이터 우선 확인 (거래량도 함께 확인)
       final cachedData = _appDataManager.getCachedStockData(stockCode);
       if (cachedData.isNotEmpty) {
-        final cachedPrice = (cachedData['prpr'] ?? 0.0).toDouble();
-        final currentPrice = (currentData['prpr'] ?? 0.0).toDouble();
+        final cachedNorm = _normalizePriceData(stockCode, cachedData);
+        final currentNorm = _normalizePriceData(stockCode, currentData);
         
-        // 캐시된 가격이 유효하고 현재 가격과 다르면 업데이트
-        if (cachedPrice > 0 && (cachedPrice - currentPrice).abs() > 0.01) {
-          print('📊 TradingBloc: 캐시된 데이터로 업데이트 - $stockCode ($currentPrice → $cachedPrice)');
-          return cachedData;
+        final cachedPrice = (cachedNorm['currentPrice'] as num?)?.toDouble() ?? 0.0;
+        final currentPrice = (currentNorm['currentPrice'] as num?)?.toDouble() ?? 0.0;
+        final cachedVolume = (cachedNorm['volume'] as num?)?.toDouble() ?? 0.0;
+        final currentVolume = (currentNorm['volume'] as num?)?.toDouble() ?? 0.0;
+        
+        // 가격 또는 거래량이 변경된 경우 업데이트
+        final priceChanged = cachedPrice > 0 && (cachedPrice - currentPrice).abs() > 0.01;
+        final volumeChanged = cachedVolume > 0 && (cachedVolume - currentVolume).abs() > 0.01;
+        
+        if (priceChanged || volumeChanged) {
+          print('📊 TradingBloc: 캐시된 데이터로 업데이트 - $stockCode (가격: $priceChanged, 거래량: $volumeChanged)');
+          return cachedNorm;
         }
       }
       
-      // 2. 확장 API의 자동 판별 메서드 사용
-      final stockData = await _unifiedApiService.getStockPriceAuto(stockCode);
+      // 2. 서버 캐시 사용: ensure → currentPrice
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+      await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
+      final priceData = await RemoteKisService.instance.getCurrentPrice(stockCode, uid: uid);
       
-      if (stockData != null && stockData.isNotEmpty) {
-        final newPrice = (stockData['prpr'] ?? 0.0).toDouble();
-        final currentPrice = (currentData['prpr'] ?? 0.0).toDouble();
+      if (priceData != null && priceData.isNotEmpty) {
+        final normalized = _normalizePriceData(stockCode, priceData);
+        final newPrice = (normalized['currentPrice'] as num?)?.toDouble() ?? 0.0;
+        final currentNorm = _normalizePriceData(stockCode, currentData);
+        final currentPrice = (currentNorm['currentPrice'] as num?)?.toDouble() ?? 0.0;
         
-        // 가격이 변경된 경우에만 업데이트
-        if (newPrice > 0 && (newPrice - currentPrice).abs() > 0.01) {
-          print('📊 TradingBloc: API 데이터로 업데이트 - $stockCode ($currentPrice → $newPrice)');
+        // 가격 또는 거래량이 변경된 경우에만 업데이트
+        final newVolume = (normalized['volume'] as num?)?.toDouble() ?? 0.0;
+        final currentVolume = (currentNorm['volume'] as num?)?.toDouble() ?? 0.0;
+        
+        final priceChanged = newPrice > 0 && (newPrice - currentPrice).abs() > 0.01;
+        final volumeChanged = newVolume > 0 && (newVolume - currentVolume).abs() > 0.01;
+        
+        if (priceChanged || volumeChanged) {
+          print('📊 TradingBloc: 서버 현재가로 업데이트 - $stockCode (가격: $priceChanged, 거래량: $volumeChanged)');
           
           // 캐시에 저장
-          _appDataManager.updateCurrentPrice(stockCode, stockData);
+          _appDataManager.updateCurrentPrice(stockCode, normalized);
           
-          return stockData;
+          return normalized;
         } else {
-          print('📊 TradingBloc: 가격 변경 없음 - $stockCode ($currentPrice)');
-          return currentData; // 기존 데이터 유지
+          print('📊 TradingBloc: 가격/거래량 변경 없음 - $stockCode');
+          return currentNorm; // 기존 데이터 유지(정규화)
         }
       } else {
-        print('⚠️ TradingBloc: API 데이터 없음 - $stockCode');
-        return currentData; // 기존 데이터 유지
+        print('⚠️ TradingBloc: 서버 현재가 없음 - $stockCode');
+        return _normalizePriceData(stockCode, currentData); // 기존 데이터 유지(정규화)
       }
     } catch (e) {
       print('❌ TradingBloc: 사일런트 현재가 로드 실패 - $stockCode: $e');
-      return currentData; // 에러 시 기존 데이터 유지
+      return _normalizePriceData(stockCode, currentData); // 에러 시 기존 데이터 유지(정규화)
     }
   }
 
@@ -238,6 +259,63 @@ class TradingBloc extends Bloc<TradingEvent, TradingState> {
     } catch (e) {
       print('❌ 분석 실패: $e');
       return null;
+    }
+  }
+
+  /// 현재가 응답/캐시를 표준 스키마로 정규화 (int/double 안전 변환, 키 통일)
+  Map<String, dynamic> _normalizePriceData(String stockCode, Map<String, dynamic> raw) {
+    try {
+      if (raw.isEmpty) return {};
+      final cp = RemoteKisService.asDouble(raw['currentPrice'] ?? raw['prpr']);
+      final pc = RemoteKisService.asDouble(raw['prevClose'] ?? raw['stck_prdy_clpr']);
+      final op = RemoteKisService.asDouble(raw['open'] ?? raw['openPrice'] ?? raw['stck_oprc']);
+      final hp = RemoteKisService.asDouble(raw['high'] ?? raw['highPrice'] ?? raw['stck_hgpr']);
+      final lp = RemoteKisService.asDouble(raw['low'] ?? raw['lowPrice'] ?? raw['stck_lwpr']);
+      final vol = RemoteKisService.asInt(raw['volume'] ?? raw['acml_vol']);
+
+      // 변동액/변동률: 서버 응답(change_amount/change_rate) 우선 → 계산 폴백
+      double diff = RemoteKisService.asDouble(raw['diff']);
+      double rate = RemoteKisService.asDouble(raw['rate']);
+      if (diff == 0.0 && raw.containsKey('changeAmount')) {
+        diff = RemoteKisService.asDouble(raw['changeAmount']);
+      }
+      if (rate == 0.0 && raw.containsKey('changeRate')) {
+        rate = RemoteKisService.asDouble(raw['changeRate']);
+      }
+      if ((diff == 0.0 || rate == 0.0) && pc > 0.0 && cp > 0.0) {
+        final calculatedDiff = cp - pc;
+        final calculatedRate = (calculatedDiff / pc) * 100.0;
+        if (diff == 0.0) diff = calculatedDiff;
+        if (rate == 0.0) rate = calculatedRate;
+      }
+      final name = (raw['stockName'] ?? raw['hts_kor_isnm'] ?? '').toString();
+
+      // UI 호환: currentPrice/prpr 모두 제공, openPrice/highPrice/lowPrice 포함
+      return {
+        'stock_code': stockCode,
+        'stockName': name,
+        'currentPrice': cp,
+        'prpr': cp,
+        'prevClose': pc,
+        // 거래탭에서 기대하는 키들(구 키 호환)
+        'open': op,
+        'high': hp,
+        'low': lp,
+        'diff': diff,
+        'rate': rate,
+        'openPrice': op,
+        'highPrice': hp,
+        'lowPrice': lp,
+        // 구 키 호환(차트/기존 위젯)
+        'stck_prdy_clpr': pc,
+        'stck_oprc': op,
+        'stck_hgpr': hp,
+        'stck_lwpr': lp,
+        'volume': vol,
+        'timestamp': raw['timestamp'] ?? DateTime.now().toIso8601String(),
+      };
+    } catch (_) {
+      return raw;
     }
   }
 

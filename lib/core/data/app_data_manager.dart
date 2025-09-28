@@ -7,6 +7,8 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 import 'package:flutter/foundation.dart';
 import '../api/kis_unified_api_service.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../config/api_config.dart';
 import '../trading/stock_cache_manager.dart';
 import '../database/repositories/watchlist_repository.dart';
@@ -31,6 +33,7 @@ import '../services/realtime_score_service.dart';
 import '../analysis/unified_analysis_service.dart';
 import '../services/local_notification_manager.dart';
 import '../ui/realtime_ui_manager.dart';
+import '../remote/remote_kis_service.dart';
 import '../trading/auto_trading_cycle.dart';
 import '../trading/background_trading_service.dart';
 import '../services/trading_event_channel.dart';
@@ -48,7 +51,7 @@ class AppDataManager {
   AppDataManager._();
 
   // API 서비스 인스턴스 - 직접 사용
-  KisUnifiedApiService get _unifiedApiService => KisUnifiedApiService();
+  KisUnifiedApiService get _unifiedApiService => KisUnifiedApiService(); // Deprecated: 서버 전환, 사용 금지
 
   // 종목 데이터
   Map<String, String> _stockNames = {};
@@ -212,34 +215,32 @@ class AppDataManager {
     }
   }
 
-  /// SQL에서 점수/가격을 조인하여 관심종목을 최신값으로 반환 (UI용)
+  /// Firestore 기반: 관심종목 + 서버 분석 점수를 조합해 반환
   Future<List<Map<String, dynamic>>> getWatchlistWithScores() async {
     try {
-      // DB에서 즉시 조회 (watchlist x top_stocks)
-      final db = await DatabaseHelper.instance.database;
-      final rows = await db.rawQuery('''
-        SELECT w.stock_code, w.stock_name, w.added_at,
-               ts.score, ts.current_price, ts.last_updated
-        FROM watchlist w
-        LEFT JOIN top_stocks ts ON ts.stock_code = w.stock_code
-        WHERE w.is_active = 1
-        ORDER BY w.added_at DESC
-      ''');
-
-      final result = <Map<String, dynamic>>[];
-      for (final r in rows) {
-        result.add({
-          'stock_code': r['stock_code'],
-          'stock_name': r['stock_name'],
-          'added_at': r['added_at'],
-          'score': r['score'] ?? 0.0,
-          'current_price': r['current_price'] ?? 0.0,
-          'last_updated': r['last_updated'],
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid == null) return [];
+      final fs = FirebaseFirestore.instance;
+      final wl = await fs.collection('users').doc(uid).collection('watchlist').get();
+      final List<Map<String, dynamic>> out = [];
+      for (final d in wl.docs) {
+        final m = d.data();
+        final code = (m['stock_code'] ?? m['stockCode'] ?? '').toString();
+        if (code.isEmpty) continue;
+        Map<String, dynamic>? a;
+        try { a = (await fs.collection('users').doc(uid).collection('analysis').doc(code).get()).data(); } catch (_) {}
+        out.add({
+          'stock_code': code,
+          'stock_name': (m['stock_name'] ?? m['stockName'] ?? '').toString(),
+          'added_at': m['added_at'],
+          'score': (a?['comprehensiveScore'] as num?)?.toDouble() ?? 0.0,
+          'current_price': (a?['currentPrice'] as num?)?.toDouble() ?? 0.0,
+          'last_updated': a?['timestamp'],
         });
       }
-      return result;
+      return out;
     } catch (e) {
-      print('❌ getWatchlistWithScores 실패: $e');
+      print('❌ getWatchlistWithScores 실패(Firestore): $e');
       return [];
     }
   }
@@ -470,46 +471,16 @@ class AppDataManager {
       // 1. API 설정 초기화
       await ApiConfig.instance.initialize();
       
-      // 2. API 설정 유효성 검사
+      // 2. API 설정 유효성 검사 (서버 전용 모드 허용)
       if (!ApiConfig.instance.isValid) {
-        throw Exception('API 설정이 유효하지 않습니다. 설정 화면에서 API 키를 등록해주세요.');
+        print('ℹ️ API 설정이 비어있습니다. 서버 전용 모드로 계속 진행합니다.');
       }
       
       // 3. KisUnifiedApiService 초기화
-      final unifiedApiService = KisUnifiedApiService();
-      await unifiedApiService.initialize(
-        appKey: ApiConfig.instance.appKey!,
-        appSecret: ApiConfig.instance.appSecret!,
-        accountNumber: ApiConfig.instance.accountNo!,
-      );
-      print('✅ KisUnifiedApiService 초기화 완료');
+      // 서버 전환: 통일API 초기화 비활성화
+      print('ℹ️ KisUnifiedApiService 초기화 건너뜀(서버 전환)');
       
-      // 4. 토큰 발급 (스플래시 블로킹 방지: 비동기로 선발급)
-      Future.microtask(() async {
-        try {
-          await unifiedApiService.initialize(
-            appKey: ApiConfig.instance.appKey!,
-            appSecret: ApiConfig.instance.appSecret!,
-            accountNumber: ApiConfig.instance.accountNo!,
-          );
-          print('✅ 토큰 선발급 성공');
-        } catch (e) {
-          print('⚠️ 토큰 선발급 실패(백그라운드): $e');
-          // 토큰 발급 실패 시 재시도 로직
-          Future.delayed(const Duration(seconds: 30), () async {
-            try {
-              await _unifiedApiService.initialize(
-                appKey: ApiConfig.instance.appKey!,
-                appSecret: ApiConfig.instance.appSecret!,
-                accountNumber: ApiConfig.instance.accountNo!,
-              );
-              print('✅ 토큰 재발급 성공');
-            } catch (retryError) {
-              print('❌ 토큰 재발급 실패: $retryError');
-            }
-          });
-        }
-      });
+      // 4. 통일API 토큰 발급 제거(서버 전환)
       
       // 5. 필수 데이터만 우선 로드 (스플래시 빠르게)
       await _loadEssentialData();
@@ -617,8 +588,8 @@ class AppDataManager {
       }
       
       if (codes.isNotEmpty) {
-        print('📦 백그라운드 히스토리 백필: ${codes.length}종목');
-        await _backfillHistoricalBars(codes.toList());
+        print('📦 백그라운드 히스토리 백필(서버 Functions): ${codes.length}종목');
+        await _backfillChartsServer(codes.toList(), days: 100);
       }
     } catch (e) {
       print('⚠️ 백그라운드 히스토리 백필 실패: $e');
@@ -1046,62 +1017,83 @@ class AppDataManager {
   /// 보유종목 로드 (private 구현) - DB 동기화 포함 - 동시 로드
   Future<void> _loadPositions() async {
     try {
-      if (_unifiedApiService.isAuthenticated) {
-        print('🔍 AppDataManager: 보유종목 동시 로드 시작...');
-        
-        // 1) 국내와 해외 보유를 동시에 로드
-        final futures = await Future.wait([
-          _unifiedApiService.getPositions(),
-          _loadOverseasPositions(),
-        ]);
-        
-        final domestic = futures[0];
-        final overseas = futures[1];
-        
-        // 2) 병합 및 0주 필터링
-        final allPositions = [...domestic, ...overseas];
-        _positions = allPositions.where((position) {
-          final hldgQty = position['hldg_qty'];
-          final quantity = position['quantity'];
-          
-          // 안전한 타입 변환
-          int qty = 0;
-          if (hldgQty != null) {
-            if (hldgQty is int) {
-              qty = hldgQty;
-            } else if (hldgQty is String) {
-              qty = int.tryParse(hldgQty) ?? 0;
-            }
-          } else if (quantity != null) {
-            if (quantity is int) {
-              qty = quantity;
-            } else if (quantity is String) {
-              qty = int.tryParse(quantity) ?? 0;
-            }
-          }
-          
-          return qty > 0;
-        }).toList();
-        
-        print('✅ AppDataManager: 보유종목 동시 로드 완료: 국내=${domestic.length}, 해외=${overseas.length}, 총=${allPositions.length}개 (0주 필터링 후: ${_positions.length}개)');
-        
-        // 보유종목 상세 정보 출력
-        for (int i = 0; i < _positions.length; i++) {
-          final item = _positions[i];
-          final currentPrice = item['prpr'] ?? 0.0;
-          print('  $i. ${item['stockCode']}: ${item['stockName']} (${item['quantity']}주, 현재가: $currentPrice)');
+      print('🔍 AppDataManager: 보유종목 로드 시작 (Firestore 우선)');
+      // 1) Firestore 스냅샷 우선 사용 (국내/해외 공통)
+      final snapshotHoldings = await _holdingsRepository.getAllHoldings();
+      int domesticCount = 0;
+      int overseasCount = 0;
+      for (final h in snapshotHoldings) {
+        final code = (h['pdno'] ?? h['stockCode'] ?? '').toString();
+        if (code.isEmpty) continue;
+        // 국내: 숫자 코드, 해외: 알파벳 코드(1~6)
+        if (RegExp(r'^[0-9]{5,6} ?$', dotAll: false).hasMatch(code) || RegExp(r'^[0-9]{5,6}$').hasMatch(code)) {
+          domesticCount++;
+        } else if (RegExp(r'^[A-Z]{1,6}$').hasMatch(code)) {
+          overseasCount++;
         }
-        
-        // 종목명 매핑 개선
-        await _improvePositionsStockNames();
-        
-        // 🔄 NEW: 보유종목 DB 동기화
-        await _syncPositionsToDatabase();
-        
-      } else {
-        print('⚠️ KisUnifiedApiService가 초기화되지 않았습니다.');
-        _positions = [];
       }
+      print('📊 Firestore 보유 스냅샷 통계: 국내=$domesticCount, 해외=$overseasCount, 총=${snapshotHoldings.length}');
+
+      // 2) 해외 보유는 필요 시 API로 보강
+      List<Map<String, dynamic>> overseas = [];
+      if (_unifiedApiService.isAuthenticated) {
+        try {
+          overseas = await _loadOverseasPositions();
+        } catch (e) {
+          print('⚠️ 해외 보유 보강 실패: $e');
+        }
+      } else {
+        print('ℹ️ API 미인증 - 해외 보유 API 보강 생략');
+      }
+
+      // 2-b) Firestore에 국내 보유가 없으면 국내 보유를 통일 API로 보강 시도
+      List<Map<String, dynamic>> domesticFromApi = [];
+      if (domesticCount == 0 && _unifiedApiService.isAuthenticated) {
+        try {
+          print('🇰🇷 Firestore에 국내 보유 없음 → 통일 API로 보강 시도');
+          final extDomestic = await _unifiedApiService.getPositionsCompat();
+          if (extDomestic.isNotEmpty) {
+            domesticFromApi = extDomestic;
+            print('✅ 통일 API 국내 보유 보강: ${domesticFromApi.length}개');
+          } else {
+            print('⚠️ 통일 API 국내 보유 보강 결과 없음');
+          }
+        } catch (e) {
+          print('⚠️ 통일 API 국내 보유 보강 실패: $e');
+        }
+      }
+
+      // 3) 병합 및 0주 필터링
+      // 코드 기준으로 중복 제거하면서 병합
+      final Map<String, Map<String, dynamic>> codeToHolding = {};
+      void addAll(List<Map<String, dynamic>> list) {
+        for (final h in list) {
+          final code = (h['pdno'] ?? h['stockCode'] ?? '').toString();
+          if (code.isEmpty) continue;
+          codeToHolding[code] = h;
+        }
+      }
+      addAll(snapshotHoldings);
+      addAll(domesticFromApi);
+      addAll(overseas);
+      final merged = codeToHolding.values.toList();
+      _positions = merged.where((position) {
+        final hldgQty = position['hldg_qty'];
+        final quantity = position['quantity'];
+        int qty = 0;
+        if (hldgQty != null) {
+          if (hldgQty is int) qty = hldgQty; else if (hldgQty is String) qty = int.tryParse(hldgQty) ?? 0;
+        } else if (quantity != null) {
+          if (quantity is int) qty = quantity; else if (quantity is String) qty = int.tryParse(quantity) ?? 0;
+        }
+        return qty > 0;
+      }).toList();
+
+      print('✅ AppDataManager: 보유종목 로드 완료: Firestore=${snapshotHoldings.length}, 국내보강=${domesticFromApi.length}, 해외보강=${overseas.length}, 병합후=${merged.length}개, 최종=${_positions.length}개');
+
+      // 종목명 매핑 개선 및 DB 동기화
+      await _improvePositionsStockNames();
+      await _syncPositionsToDatabase();
     } catch (e) {
       print('❌ 보유 종목 로드 실패: $e');
       print('❌ 에러 상세: ${e.toString()}');
@@ -2630,6 +2622,29 @@ class AppDataManager {
       print('🧹 $stockCode 200일 히스토리 삭제 완료');
     } catch (e) {
       print('⚠️ $stockCode 200일 히스토리 삭제 실패: $e');
+    }
+  }
+
+  /// 서버 Functions를 통해 charts/{symbol}/daily 생성 보장
+  Future<void> _backfillChartsServer(List<String> stockCodes, {int days = 100}) async {
+    try {
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+      int ok = 0;
+      for (final code in stockCodes) {
+        try {
+          // 서버에 분석 트리거 → 차트 생성 → 일봉 조회로 보장
+          await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: code);
+          final items = await RemoteKisService.instance.getDailyChart(code, days: days, uid: uid);
+          print('✅ 서버 차트 보장: $code (${items.length}일)');
+          ok++;
+          await Future.delayed(const Duration(milliseconds: 80));
+        } catch (e) {
+          print('⚠️ 서버 차트 보장 실패: $code - $e');
+        }
+      }
+      print('📦 서버 차트 보장 완료: 성공 ${ok}/${stockCodes.length}');
+    } catch (e) {
+      print('⚠️ 서버 차트 보장 루틴 실패: $e');
     }
   }
 

@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/config/api_config.dart';
+import '../../core/remote/credentials_service.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../../core/data/app_data_manager.dart';
 import '../splash/splash_screen.dart';
 
@@ -71,7 +73,7 @@ class _ApiKeySetupScreenState extends State<ApiKeySetupScreen> {
         print('⚠️ AppDataManager 초기화 실패, 계속 진행: $e');
       }
       
-      // 1. API 설정 저장
+      // 1. API 설정 저장(로컬) 및 서버 저장
       await ApiConfig.instance.saveConfig(
         appKey: _appKeyController.text.trim(),
         appSecret: _appSecretController.text.trim(),
@@ -79,6 +81,22 @@ class _ApiKeySetupScreenState extends State<ApiKeySetupScreen> {
         isReal: true,
       );
       await ApiConfig.instance.initialize();
+
+      // 서버에 자격 저장(Secret은 서버 전용)
+      try {
+        final uid = FirebaseAuth.instance.currentUser?.uid;
+        if (uid != null) {
+          final ok = await CredentialsService.instance.saveApiCredentials(
+            uid: uid,
+            appKey: _appKeyController.text.trim(),
+            appSecret: _appSecretController.text.trim(),
+            accountNo: _accountNoController.text.trim(),
+          );
+          print(ok ? '✅ 서버 자격 저장 완료' : '❌ 서버 자격 저장 실패');
+        }
+      } catch (e) {
+        print('⚠️ 서버 자격 저장 중 오류: $e');
+      }
 
       // 2. 저장 후 즉시 검증
       final config = ApiConfig.instance;

@@ -288,16 +288,8 @@ class RecommendedStocksData {
         }
       } catch (_) {}
       
-      await topRepo.saveTopStock(
-        stockCode: symbol,
-        stockName: name ?? symbol,
-        market: market,
-        score: score,
-        currentPrice: price,
-        tradingAmount: tradingAmount,
-        tradingCurrency: tradingCurrency,
-        rank: 0, // 순위는 별도 계산
-      );
+      // 서버 전환: 클라이언트에서 top_stocks 저장 금지 → 저장 스킵
+      // 서버 Functions가 recommendations/top10 및 분석 결과를 관리합니다.
       
       // 메모리 캐시 업데이트 (선택적)
       _stockScores[symbol] = {
@@ -309,7 +301,7 @@ class RecommendedStocksData {
         ...?metadata,
       };
       
-      print('💾 [$symbol] SQL 점수 저장 완료: $score');
+      print('💾 [$symbol] 점수 캐시 갱신(서버 저장 스킵): $score');
     } catch (e) {
       print('❌ [$symbol] SQL 점수 저장 실패: $e');
     }

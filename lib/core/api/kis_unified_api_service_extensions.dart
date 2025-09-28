@@ -22,22 +22,8 @@ extension KisUnifiedApiServiceExtensions on KisUnifiedApiService {
   /// - 국내주식: 6자리 숫자 (예: 005930)
   /// - 해외주식: 1-5자리 영문 (예: AAPL, TSLA)
   Future<Map<String, dynamic>?> getStockPriceAuto(String stockCode) async {
-    try {
-      print('🔍 [확장API] 종목 자동 판별: $stockCode');
-      
-      // 해외주식 판별 (대문자 영문 1-5자리)
-      if (RegExp(r'^[A-Z]{1,5}$').hasMatch(stockCode)) {
-        return await getOverseasStockPrice(
-          symbol: stockCode,
-          exchangeCode: 'NAS', // 기본값: 나스닥
-        );
-      } else {
-        return await getStockPrice(stockCode);
-      }
-    } catch (e) {
-      print('❌ [확장API] 종목 자동 판별 오류: $e');
-      return null;
-    }
+    // 서버 전환: 클라이언트에서 통일API 호출 금지
+    return null;
   }
   
   /// 종목 코드 자동 판별 및 차트 조회
@@ -99,15 +85,9 @@ extension KisUnifiedApiServiceExtensions on KisUnifiedApiService {
       }
       
       // 2. 해외 계좌 잔고 조회 (계좌 확장 파일 사용)
-      print('🔍 [확장API] 해외 계좌 잔고 조회 시작');
-      final overseasBalance = await getOverseasAccountBalance(
-        cano: cano,
-        acntPrdtCd: acntPrdtCd,
-      );
-      print('📊 [확장API] 해외 계좌 잔고 조회 결과: ${overseasBalance != null ? '성공' : '실패'}');
-      if (overseasBalance != null) {
-        print('📊 [확장API] 해외 보유종목 개수: ${(overseasBalance['holdings'] as List?)?.length ?? 0}개');
-      }
+      // 서버 전용 모드: 해외 계좌 잔고 조회 비활성화 (UI는 서버 데이터만 사용)
+      print('⛔ [확장API] 해외 계좌 잔고 조회 비활성화 - 서버 전용 모드');
+      final Map<String, dynamic>? overseasBalance = null;
       
       // 3. 결과 통합
       final result = {
@@ -160,10 +140,9 @@ extension KisUnifiedApiServiceExtensions on KisUnifiedApiService {
       final cano = extractCano();
       final acntPrdtCd = extractPrdtCd();
       
-      final overseas = await getOverseasAccountBalance(
-        cano: cano,
-        acntPrdtCd: acntPrdtCd,
-      );
+      // 서버 전용 모드: 해외 보유종목 조회 비활성화
+      print('⛔ [확장API] 해외 보유종목 조회 비활성화 - 서버 전용 모드');
+      final Map<String, dynamic>? overseas = null;
       
       if (overseas != null && overseas['holdings'] != null) {
         final holdings = overseas['holdings'] as List;
@@ -228,11 +207,9 @@ extension KisUnifiedApiServiceExtensions on KisUnifiedApiService {
     try {
       final cano = extractCano();
       final acntPrdtCd = extractPrdtCd();
-      final balance = await getOverseasAccountBalance(
-        cano: cano,
-        acntPrdtCd: acntPrdtCd,
-        ovrsExcCd: 'NASD',
-      );
+      // 서버 전용 모드: 해외 결제준비금 조회 비활성화
+      print('⛔ [확장API] 해외 결제준비금 조회 비활성화 - 서버 전용 모드');
+      final Map<String, dynamic>? balance = null;
       
       if (balance != null && balance['cashBalance'] != null) {
         final cashBalance = balance['cashBalance'] as List;

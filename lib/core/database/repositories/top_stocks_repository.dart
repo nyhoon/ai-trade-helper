@@ -13,6 +13,7 @@ class TopStocksRepository {
   }
 
   /// 상위 점수 종목 저장/업데이트
+  /// 클라이언트 직접 쓰기 차단: 서버만 저장
   Future<int> saveTopStock({
     required String stockCode,
     required String stockName,
@@ -28,52 +29,12 @@ class TopStocksRepository {
     String? tradingCurrency,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
-    await _col().doc(stockCode).set({
-      'stock_code': stockCode,
-      'stock_name': stockName,
-      'market': MarketTimeValidator.instance.getMarketFromSymbol(stockCode),
-      'score': score,
-      'current_price': currentPrice,
-      'price_change': priceChange,
-      'price_change_rate': priceChangeRate,
-      'volume': volume,
-      'volume_ratio': volumeRatio,
-      'trading_amount': tradingAmount ?? 0,
-      'trading_currency': tradingCurrency ?? (market == 'KOSPI' || market == 'KOSDAQ' ? 'KRW' : 'USD'),
-      'rank': rank,
-      'last_updated': now,
-      'created_at': now,
-      'updated_at': now,
-    }, SetOptions(merge: true));
-    return 1;
+    throw Exception('Client writes to top_stocks are disabled. Use server functions.');
   }
 
   /// 여러 상위 점수 종목 일괄 저장/업데이트
   Future<void> saveManyTopStocks(List<Map<String, dynamic>> stocks) async {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final batch = FirebaseFirestore.instance.batch();
-    for (final stock in stocks) {
-      final String code = stock['stockCode'];
-      batch.set(_col().doc(code), {
-        'stock_code': code,
-        'stock_name': stock['stockName'],
-        'market': MarketTimeValidator.instance.getMarketFromSymbol(code),
-        'score': stock['score'],
-        'current_price': stock['currentPrice'],
-        'price_change': stock['priceChange'] ?? 0,
-        'price_change_rate': stock['priceChangeRate'] ?? 0,
-        'volume': stock['volume'] ?? 0,
-        'volume_ratio': stock['volumeRatio'] ?? 1.0,
-        'trading_amount': stock['tradingAmount'] ?? 0,
-        'trading_currency': stock['tradingCurrency'] ?? 'KRW',
-        'rank': stock['rank'],
-        'last_updated': now,
-        'created_at': now,
-        'updated_at': now,
-      }, SetOptions(merge: true));
-    }
-    await batch.commit();
-    print('📊 상위 점수 종목 ${stocks.length}개 저장 완료(Firestore)');
+    throw Exception('Client writes to top_stocks are disabled. Use server functions.');
   }
 
   /// 저장된 market 필드 일괄 정규화 (코드 기반 재판별)

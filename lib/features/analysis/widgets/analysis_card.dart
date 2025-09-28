@@ -75,8 +75,9 @@ class AnalysisCard extends StatelessWidget {
                 buildStockHeader(item, currentPriceData),
                 const SizedBox(height: 12),
 
-                if (isHolding || _isNasdaqStock(stockCode)) buildHoldingsInfo(item, analysisData),
-                if (isHolding || _isNasdaqStock(stockCode)) const SizedBox(height: 8),
+                // 보유정보는 실제로 보유한 종목만 표시
+                if (isHolding) buildHoldingsInfo(item, analysisData),
+                if (isHolding) const SizedBox(height: 8),
 
                 if (analysisData != null)
                   FutureBuilder<Widget>(

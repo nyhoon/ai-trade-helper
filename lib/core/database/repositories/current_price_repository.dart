@@ -8,7 +8,7 @@ class CurrentPriceRepository {
   CollectionReference<Map<String, dynamic>> _userCol(String uid, String name) =>
       FirebaseFirestore.instance.collection('users').doc(uid).collection(name);
 
-  /// 현재가 데이터 삽입 또는 업데이트
+  /// 현재가 데이터 삽입 또는 업데이트 (Firestore 직접 쓰기 비활성화)
   Future<void> insertOrUpdateCurrentPrice({
     required String stockCode,
     required String market,
@@ -25,25 +25,9 @@ class CurrentPriceRepository {
     double? per,
     double? pbr,
   }) async {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    await _doc(stockCode).set({
-      'stock_code': stockCode,
-      'market': market,
-      'current_price': currentPrice,
-      'prev_close': prevClose,
-      'change_amount': changeAmount,
-      'change_rate': changeRate,
-      'volume': volume,
-      'trade_amount': tradeAmount,
-      'high_price': highPrice,
-      'low_price': lowPrice,
-      'open_price': openPrice,
-      'market_cap': marketCap,
-      'per': per,
-      'pbr': pbr,
-      'timestamp': now,
-      'updated_at': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    // Firestore 직접 쓰기 비활성화 - 서버 Functions를 통해서만 데이터 저장
+    print('📊 $stockCode: 현재가 데이터는 서버 Functions를 통해 저장됩니다');
+    print('⚠️ 클라이언트에서 Firestore 직접 쓰기 비활성화됨 (권한 문제 방지)');
   }
 
   /// 여러 종목의 현재가 데이터 일괄 삽입 (최적화)

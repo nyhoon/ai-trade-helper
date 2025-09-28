@@ -377,23 +377,29 @@ class AiRecommendationService {
         if (scoreResult is Map<String, dynamic>) {
           final score = scoreResult['score'] as double;
           final price = scoreResult['price'] as double;
+          final skipped = scoreResult['skipped'] as bool? ?? false;
           
-          // 음수 점수도 저장/표시: 분석/자동매매와 동일 동작
-          stockScores.add({
-            'symbol': stock['symbol'],
-            'name': stock['name'],
-            'comprehensiveScore': score,
-            'market': stock['market'] ?? _getMarketFromSymbol(stock['symbol']!),
-            'price': price,
-            'timestamp': DateTime.now().toIso8601String(),
-          });
-          
-          // 개별 종목의 점수 정보를 저장 (가격/시장/타임스탬프 포함)
-          await _recommendedStocksData.updateStockScore(stock['symbol']!, score, metadata: {
-            'price': price,
-            'market': stock['market'] ?? _getMarketFromSymbol(stock['symbol']!),
-            'timestamp': DateTime.now().toIso8601String(),
-          });
+          // 건너뛴 종목은 제외 (데이터 없음으로 인한 오류 방지)
+          if (!skipped) {
+            // 음수 점수도 저장/표시: 분석/자동매매와 동일 동작
+            stockScores.add({
+              'symbol': stock['symbol'],
+              'name': stock['name'],
+              'comprehensiveScore': score,
+              'market': stock['market'] ?? _getMarketFromSymbol(stock['symbol']!),
+              'price': price,
+              'timestamp': DateTime.now().toIso8601String(),
+            });
+            
+            // 개별 종목의 점수 정보를 저장 (가격/시장/타임스탬프 포함)
+            await _recommendedStocksData.updateStockScore(stock['symbol']!, score, metadata: {
+              'price': price,
+              'market': stock['market'] ?? _getMarketFromSymbol(stock['symbol']!),
+              'timestamp': DateTime.now().toIso8601String(),
+            });
+          } else {
+            print('⚠️ [AI 추천] $symbol 데이터 없음으로 건너뛰기 (8397개 종목 순차 처리 방지)');
+          }
         }
         
         // API 호출 간격 조절 (과도한 호출 방지)
@@ -531,109 +537,20 @@ class AiRecommendationService {
       }
       
       // 데이터가 없거나 최소 바 미만이면 API 재수집 (분석/자동매매와 동일 기준)
+      // 단, 이미 데이터가 있는 종목만 처리 (8397개 종목 순차 처리 방지)
       if (localChartData.isEmpty || localChartData.length < ChartConstants.CHART_MIN_BARS) {
-        print('📊 [AI 추천] $symbol 로컬DB 데이터 없음, API에서 수집 시도...');
-        
-        try {
-          // 로컬DB에 없으면 API에서 차트 데이터 수집
-          List<Map<String, dynamic>> chartData = [];
-          
-          if (_getMarketFromSymbol(symbol) == 'NASDAQ') {
-            // 나스닥 종목: 해외 전용 차트 API (실패 시 현재가 API로 대체) - 통일된 API 서비스
-            print('📊 [AI 추천] $symbol 나스닥 종목, 해외 주식 차트 데이터 수집 시도...');
-            chartData = await _retry(() => RemoteKisService.instance.getDailyChart(symbol, days: ChartConstants.CHART_MIN_BARS), retries: 3, initialDelay: const Duration(milliseconds: 300));
-            
-            // 차트 데이터가 없으면 현재가 API로 기본 데이터 생성
-            if (chartData.isEmpty) {
-              print('📊 [AI 추천] $symbol 차트 데이터 없음, 현재가 API로 기본 데이터 생성...');
-              final currentPriceData = await _retry(() => RemoteKisService.instance.getCurrentPrice(symbol), retries: 3, initialDelay: const Duration(milliseconds: 300));
-              
-              if (currentPriceData != null && currentPriceData.isNotEmpty) {
-                final currentPrice = _parseDouble(currentPriceData['currentPrice']);
-                final prevClose = _parseDouble(currentPriceData['prevClose']);
-                
-                // 현재가로 기본 차트 데이터 생성 (1일치)
-                chartData = [{
-                  'date': DateTime.now().toIso8601String().split('T')[0],
-                  'open': currentPrice,
-                  'high': currentPrice,
-                  'low': currentPrice,
-                  'close': currentPrice,
-                  'volume': _parseInt(currentPriceData['volume']),
-                  'trade_amount': 0,
-                }];
-                
-                print('📊 [AI 추천] $symbol 현재가 기반 기본 차트 데이터 생성: ${chartData.length}개');
-              }
-            }
-          } else {
-            // 국내 종목: 일별 차트 최소 바 수 강제 확보
-            print('📊 [AI 추천] $symbol 국내 종목, 국내 주식 차트 데이터 수집');
-            chartData = await _fetchDomesticDailyChartData(symbol, minCount: ChartConstants.CHART_MIN_BARS);
-          }
-          
-          if (chartData.isNotEmpty) {
-            // 수집된 데이터를 로컬DB에 저장
-            final formattedData = chartData.map((data) => {
-              'stock_code': symbol,
-              'market': _getMarketFromSymbol(symbol),
-              'date': data['date'] ?? DateTime.now().toIso8601String().split('T')[0],
-              'open': (data['open'] ?? 0.0).toDouble(),
-              'high': (data['high'] ?? 0.0).toDouble(),
-              'low': (data['low'] ?? 0.0).toDouble(),
-              'close': (data['close'] ?? 0.0).toDouble(),
-              'volume': (data['volume'] ?? 0).toInt(),
-              'trade_amount': data['trade_amount'],
-            }).toList();
-            
-            await _historicalDataRepo.upsertDailyBars(
-              stockCode: symbol,
-              market: _getMarketFromSymbol(symbol),
-              bars: formattedData,
-            );
-            
-            // 로컬DB에서 다시 조회 후 개수 검증
-            localChartData = await _historicalDataRepo.getRecentBars(symbol, limit: ChartConstants.CHART_MIN_BARS);
-            if (localChartData.length < ChartConstants.CHART_MIN_BARS) {
-              print('⚠️ [AI 추천] '+symbol+' 재수집 필요: 저장 후 '+localChartData.length.toString()+'개 < '+ChartConstants.CHART_MIN_BARS.toString()+'개');
-              final more = await _fetchDomesticDailyChartData(symbol, minCount: ChartConstants.CHART_MIN_BARS);
-              if (more.isNotEmpty) {
-                final moreFormatted = more.map((data) => {
-                  'stock_code': symbol,
-                  'market': _getMarketFromSymbol(symbol),
-                  'date': data['date'] ?? DateTime.now().toIso8601String().split('T')[0],
-                  'open': (data['open'] ?? 0.0).toDouble(),
-                  'high': (data['high'] ?? 0.0).toDouble(),
-                  'low': (data['low'] ?? 0.0).toDouble(),
-                  'close': (data['close'] ?? 0.0).toDouble(),
-                  'volume': (data['volume'] ?? 0).toInt(),
-                  'trade_amount': data['trade_amount'],
-                }).toList();
-                await _historicalDataRepo.upsertDailyBars(
-                  stockCode: symbol,
-                  market: _getMarketFromSymbol(symbol),
-                  bars: moreFormatted,
-                );
-                localChartData = await _historicalDataRepo.getRecentBars(symbol, limit: ChartConstants.CHART_MIN_BARS);
-              }
-            }
-            print('📊 [AI 추천] $symbol API에서 데이터 수집 완료: ${localChartData.length}개');
-          } else {
-            print('📊 [AI 추천] $symbol 차트 데이터 없음, 현재가 API로 시도...');
-            // 차트 데이터가 없어도 현재가 API는 시도해보기
-          }
-        } catch (e) {
-          print('📊 [AI 추천] $symbol API 데이터 수집 실패: $e, 로컬 재조회 후 판단');
-          // 마지막 시도: 혹시 기존에 저장된 데이터가 있으면 활용
-          localChartData = await _historicalDataRepo.getRecentBars(symbol, limit: ChartConstants.CHART_MIN_BARS);
-          if (localChartData.isEmpty) {
-            return {
-              'score': 0.0,
-              'price': 0.0,
-            };
-          }
-        }
+        // 히스토리 데이터가 없는 종목은 즉시 건너뛰기 (불필요한 API 호출 방지)
+        print('❌ [AI 추천] $symbol 히스토리 데이터 없음, 분석 불가');
+        print('⚠️ [AI 추천] $symbol 데이터 없음으로 건너뛰기 (8397개 종목 순차 처리 방지)');
+        return {
+          'score': 0.0,
+          'price': 0.0,
+          'skipped': true, // 건너뛴 종목 표시
+        };
       }
+      
+      // 데이터가 있으면 분석 진행
+      print('📊 [AI 추천] $symbol 데이터 확인 완료 (${localChartData.length}개), 분석 진행...');
       
       // 현재가 조회 (로컬 DB 우선 사용 - 분석탭과 동일한 로직)
       var currentPrice = await _currentPriceRepo.getCurrentPrice(symbol);
@@ -659,9 +576,11 @@ class AiRecommendationService {
           print('  - 거래량: ${currentPrice['volume']}');
         } else {
           print('❌ [AI 추천] $symbol 히스토리 데이터도 없음, 분석 불가');
+          print('⚠️ [AI 추천] $symbol 데이터 없음으로 건너뛰기 (8397개 종목 순차 처리 방지)');
           return {
             'score': 0.0,
             'price': 0.0,
+            'skipped': true, // 건너뛴 종목 표시
           };
         }
       } else {
@@ -1012,7 +931,7 @@ class AiRecommendationService {
       // 타입 안전성을 위한 명시적 변환
       final currentPriceValue = _parseDouble(currentPrice?['currentPrice']);
       final prevCloseValue = _parseDouble(currentPrice?['prevClose']);
-      final volumeValue = _parseDouble(currentPrice?['volume']);
+      final volumeValue = _parseDouble(currentPrice?['volume']); // 이미 double로 변환
       final highPriceValue = _parseDouble(currentPrice?['highPrice']);
       final lowPriceValue = _parseDouble(currentPrice?['lowPrice']);
       final openPriceValue = _parseDouble(currentPrice?['openPrice']);
@@ -1032,7 +951,7 @@ class AiRecommendationService {
         symbol,
         currentPrice: currentPriceValue,
         prevClose: prevCloseValue,
-        volume: volumeValue,
+        volume: volumeValue, // 이미 double로 변환됨
         highPrice: highPriceValue,
         lowPrice: lowPriceValue,
         openPrice: openPriceValue,

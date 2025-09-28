@@ -4,7 +4,7 @@ import '../data/app_data_manager.dart';
 import '../database/repositories/notification_history_repository.dart';
 import '../data/app_data_manager.dart';
 import '../trading/market_time_validator.dart';
-import '../api/kis_unified_api_service.dart';
+import '../remote/remote_kis_service.dart';
 // import '../trading/auto_trading_service.dart';
 
 /// 시그널 상태 추적 클래스
@@ -222,10 +222,9 @@ class SignalTracker {
       if (dbNow > 0) return dbNow;
       if (dbPrev > 0) return dbPrev;
 
-      // 3) API (가능할 때만)
+      // 3) 서버 캐시(가능할 때만)
       try {
-        final kis = KisUnifiedApiService();
-        final Map<String, dynamic>? api = await kis.getStockPrice(stockCode);
+        final api = await RemoteKisService.instance.getCurrentPrice(stockCode);
         if (api != null) {
           final apiNow = (api['currentPrice'] as num?)?.toDouble() ?? 0.0;
           final apiPrev = (api['prevClose'] as num?)?.toDouble() ?? 0.0;

@@ -17,8 +17,11 @@ import '../../core/ai/ai_recommendation_service.dart';
 import '../../core/services/integrated_monitoring_service.dart';
 import '../../core/services/performance_monitor.dart';
 import '../../core/testing/integrated_test_system.dart';
-import '../../core/api/kis_unified_api_service.dart';
+import '../../core/remote/remote_kis_service.dart';
+import '../../core/remote/analysis_functions_service.dart';
 import '../../core/trading/market_time_validator.dart';
+import '../../core/api/kis_unified_api_service.dart';
+import '../../core/api/unified_stock_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../core/trading/auto_trading_cycle.dart';
 import '../main/main_screen.dart';
@@ -26,6 +29,7 @@ import '../onboarding/api_key_setup_screen.dart';
 import '../../core/config/api_config.dart';
 import '../../core/services/permission_manager.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -168,23 +172,12 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
         print('⚠️ 3단계: 증분 데이터 매니저 초기화 실패했지만 계속 진행');
       }
       
-      // 4) 추천 스캐너는 메인화면 진입 직후 시작 (스플래시 종료 이후)
-      await _animateTo(0.55, '추천 스캐너 준비 중...');
-
-      // 4) 관심종목 및 보유종목 데이터 로딩 (최적화된 버전)
-      await _animateTo(0.60, '관심종목 데이터 로딩 중...');
-      print('🔍 4단계: 관심종목 및 보유종목 데이터 로딩 시작...');
+      // 4) API 키 설정 확인 (먼저 확인!)
+      await _animateTo(0.40, 'API 설정 확인 중...');
+      print('🔍 4단계: API 설정 확인 시작...');
       
-      // 메모리 부족 방지를 위해 필수 데이터만 로드
-      await _loadEssentialWatchlistData();
-      
-      // 7) 자동매매 권한 확인 및 요청 (빠르게 처리)
-      await _animateTo(0.90, '자동매매 권한 확인 중...');
-      await _checkAndRequestPermissions();
-      
-      // 8) API 키 설정 확인 (빠르게 처리)
-      await _animateTo(0.92, 'API 설정 확인 중...');
       final config = ApiConfig.instance;
+      await config.initialize(); // API 설정 초기화
       
       if (!config.isValid) {
         print('⚠️ API 키가 설정되지 않음 - API 키 설정 화면으로 이동');
@@ -195,6 +188,30 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
         }
         return;
       }
+      print('✅ API 설정 확인 완료');
+
+      // KIS 통일 API 클라이언트 즉시 초기화(로컬 호출 경로 사용부 대비)
+      try {
+        await KisUnifiedApiService().initialize(
+          appKey: ApiConfig.instance.appKey!,
+          appSecret: ApiConfig.instance.appSecret!,
+          accountNumber: ApiConfig.instance.accountNo!,
+        );
+        print('✅ KIS 통일 API 클라이언트 초기화 완료');
+      } catch (e) {
+        print('❌ KIS 통일 API 클라이언트 초기화 실패: $e');
+      }
+
+      // 5) 관심종목 및 보유종목 데이터 로딩 (API 설정 후)
+      await _animateTo(0.60, '관심종목 데이터 로딩 중...');
+      print('🔍 5단계: 관심종목 및 보유종목 데이터 로딩 시작...');
+      
+      // 메모리 부족 방지를 위해 필수 데이터만 로드
+      await _loadEssentialWatchlistData();
+      
+      // 6) 자동매매 권한 확인 및 요청 (빠르게 처리)
+      await _animateTo(0.90, '자동매매 권한 확인 중...');
+      await _checkAndRequestPermissions();
       
       // 9) 실시간 업데이트 서비스 시작 (빠르게 처리)
       await _animateTo(0.95, '실시간 서비스 시작 중...');
@@ -310,6 +327,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
         );
         // 메인 진입 직후 추천 스캐너 시작
         Timer(const Duration(milliseconds: 100), () async {
+          if (!mounted) return;
           try {
             await _aiRecommendationService.startResumableBackgroundScan();
             print('✅ 메인 진입 후 추천 스캐너 시작');
@@ -344,6 +362,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
   }
   
   Future<void> _updateProgress(double progress, String task) async {
+    if (!mounted) return;
     setState(() {
       _progress = progress;
       _currentTask = task;
@@ -655,39 +674,43 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
       final totalCount = uniqueStocks.length;
       
       if (totalCount > 0) {
-        // 메모리 선처리 개수 상향(보유 종목 우선)
-        final maxStocks = totalCount > 30 ? 30 : totalCount;
-        final essentialStocks = uniqueStocks.take(maxStocks).toList();
-        
-        print('📊 필수 데이터 로딩: $maxStocks개 종목 (전체 $totalCount개 중)');
+        // 모든 관심종목과 보유종목 최신화 (제한 없음)
+        print('📊 모든 관심종목/보유종목 데이터 로딩: $totalCount개 종목');
         
         // 순차 처리로 메모리 사용량 제한
-        for (int i = 0; i < essentialStocks.length; i++) {
-          final stock = essentialStocks[i];
+        for (int i = 0; i < uniqueStocks.length; i++) {
+          final stock = uniqueStocks[i];
           final stockCode = stock['stock_code']?.toString() ?? '';
           final stockName = stock['stock_name']?.toString() ?? '';
           final market = stock['market']?.toString() ?? 'UNKNOWN';
           
-          final progress = 0.65 + (0.15 * i / essentialStocks.length);
+          final progress = 0.65 + (0.15 * i / uniqueStocks.length);
           final typeLabel = (stock['type'] ?? '').toString();
           final label = typeLabel == 'holdings' || typeLabel == 'both' ? '보유종목' : '관심종목';
-          await _animateTo(progress, '$label ${i + 1}/${essentialStocks.length} 처리 중...');
+          await _animateTo(progress, '$label ${i + 1}/${uniqueStocks.length} 처리 중...');
           
           try {
             print('📊 $stockCode ($stockName) 현재가 데이터만 로딩...');
             
-            // 현재가 데이터만 로딩 (차트 데이터는 백그라운드에서 처리)
+            // 1. 현재가 데이터만 로딩 (차트 데이터는 백그라운드에서 처리)
             await _dataManager.loadCurrentPriceData(stockCode, market);
 
-            // Firestore prices 채우기 보장: @api 현재가 호출(국내/해외 분기)
+            // 2. Firestore prices 채우기 보장: @api 현재가 호출(국내/해외 분기)
             await _fetchPriceWithRetry(stockCode: stockCode, market: market);
 
-            // 차트 컬렉션 생성(옵션): 로컬 DB 제거 대비 Firestore에 기본 ohlcv 업서트
+            // 3. 차트 컬렉션 생성(옵션): 로컬 DB 제거 대비 Firestore에 기본 ohlcv 업서트
             try {
               await _loadChartDataForStock(stockCode, market);
             } catch (e) {
               print('⚠️ 차트 업서트 시도 실패($stockCode): $e');
             }
+
+            // 4. 거래량 데이터 강제 갱신 (해외주식 거래량 0 문제 해결)
+            await _ensureVolumeData(stockCode, market);
+            
+            // 5. 분석 데이터 강제 생성 (관심종목 분석 데이터 없음 문제 해결)
+            final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+            await _ensureAnalysisData(stockCode, uid);
             
             print('✅ $stockCode ($stockName) 현재가 데이터 로딩 완료');
             loadedCount++;
@@ -698,12 +721,6 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
           } catch (e) {
             print('❌ $stockCode ($stockName) 데이터 로딩 실패: $e');
           }
-        }
-        
-        // 나머지 종목들은 백그라운드에서 처리
-        if (totalCount > maxStocks) {
-          print('🔄 나머지 ${totalCount - maxStocks}개 종목은 백그라운드에서 처리됩니다.');
-          _loadRemainingStocksInBackground(uniqueStocks.skip(maxStocks).toList());
         }
       } else {
         await _animateTo(0.75, '로딩할 종목이 없습니다.');
@@ -725,86 +742,120 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
     }
   }
 
-  /// 나머지 종목들을 백그라운드에서 처리
-  void _loadRemainingStocksInBackground(List<Map<String, dynamic>> remainingStocks) {
-    // 백그라운드에서 처리하여 메인 스레드 블로킹 방지
-    Future.microtask(() async {
-      try {
-        print('🔄 백그라운드 데이터 로딩 시작: ${remainingStocks.length}개 종목');
-        
-        // 배치 크기를 더 작게 설정하여 메모리 사용량 제한
-        const int backgroundBatchSize = 3;
-        
-        for (int i = 0; i < remainingStocks.length; i += backgroundBatchSize) {
-          final end = (i + backgroundBatchSize < remainingStocks.length) 
-              ? i + backgroundBatchSize 
-              : remainingStocks.length;
-          final batch = remainingStocks.sublist(i, end);
-          
-          // 배치 내 종목들을 순차 처리
-          for (final stock in batch) {
-            final stockCode = stock['stock_code']?.toString() ?? '';
-            final market = stock['market']?.toString() ?? 'UNKNOWN';
-            
-            try {
-              // 현재가 데이터만 로딩
-              await _dataManager.loadCurrentPriceData(stockCode, market);
-              // Firestore prices 채우기 보장: @api 현재가 호출(국내/해외 분기)
-              await _fetchPriceWithRetry(stockCode: stockCode, market: market, isBackground: true);
-
-              // 백그라운드에서도 차트 업서트 시도
-              try {
-                await _loadChartDataForStock(stockCode, market);
-              } catch (e) {
-                print('⚠️(bg) 차트 업서트 시도 실패($stockCode): $e');
-              }
-              
-              // 메모리 정리를 위한 대기
-              await Future.delayed(const Duration(milliseconds: 200));
-              
-            } catch (e) {
-              print('❌ 백그라운드 $stockCode 데이터 로딩 실패: $e');
-            }
-          }
-          
-          // 배치 간 메모리 정리를 위한 대기
-          await Future.delayed(const Duration(milliseconds: 500));
-        }
-        
-        print('✅ 백그라운드 데이터 로딩 완료');
-        
-      } catch (e) {
-        print('❌ 백그라운드 데이터 로딩 실패: $e');
-      }
-    });
-  }
+  /// 백그라운드 처리 제거됨 - 모든 종목을 메인에서 처리
 
   /// 현재가 API 호출 보장 + 재시도(최대 2회). 국내/해외 자동 분기
-  Future<void> _fetchPriceWithRetry({required String stockCode, required String market, bool isBackground = false}) async {
-    final api = KisUnifiedApiService();
-    final isDomestic = RegExp(r'^[0-9]{6}$').hasMatch(stockCode);
+  Future<void> _fetchPriceWithRetry({required String stockCode, required String market}) async {
     const int maxRetries = 2;
     for (int attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        if (isDomestic) {
-          await api.getDomesticStockPrice(stockCode: stockCode);
-        } else {
-          // 거래소 코드 추정: 시장/심볼 기반
-          final excd = (market == 'NYSE' || market == 'NYS') ? 'NYS' : 'NAS';
-          await api.getOverseasStockPrice(symbol: stockCode, exchangeCode: excd);
+        final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+        
+        // 1. 차트데이터 강제 최신화 (서버에서)
+        print('🔄 $stockCode 차트데이터 강제 최신화 시도...');
+        await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
+        
+        // 2. 현재가 데이터 강제 최신화 (통일된 서비스 사용)
+        print('🔄 $stockCode 현재가 데이터 강제 최신화 시도...');
+        final price = await UnifiedStockService.instance.getCurrentPrice(stockCode, uid: uid);
+        
+        if (price != null && price['currentPrice'] != null) {
+          print('✅ $stockCode 데이터 최신화 성공: ${price['currentPrice']}');
+          break;
         }
-        // 성공 시 탈출
-        break;
+        
+        // 3. 서버 실패 시 클라이언트 직접 호출 (통일된 서비스 사용)
+        print('⚠️ $stockCode 서버 실패 → 클라이언트 직접 호출...');
+        final clientPrice = await UnifiedStockService.instance.getCurrentPrice(stockCode);
+        if (clientPrice != null) {
+          print('✅ $stockCode 클라이언트 직접 호출 성공: ${clientPrice['currentPrice']}');
+          break;
+        }
+        
+        throw Exception('no price from server and client');
       } catch (e) {
         if (attempt == maxRetries) {
-          print('❌ 현재가 API 최종 실패($stockCode): $e');
+          print('❌ 현재가 서버 최종 실패($stockCode): $e');
         } else {
           final delayMs = 500 * (attempt + 1);
-          final tag = isBackground ? '(bg)' : '';
-          print('⚠️ $tag 현재가 API 실패 재시도($stockCode) - ${attempt + 1}/$maxRetries (${delayMs}ms 후)');
+          print('⚠️ 현재가 서버 실패 재시도($stockCode) - ${attempt + 1}/$maxRetries (${delayMs}ms 후)');
           await Future.delayed(Duration(milliseconds: delayMs));
         }
       }
+    }
+  }
+
+  /// 클라이언트에서 직접 현재가 조회 (서버 실패 시 백업) - UnifiedStockService 사용
+  Future<Map<String, dynamic>?> _fetchPriceDirectly(String stockCode, String market) async {
+    try {
+      // 통일된 서비스 사용
+      final result = await UnifiedStockService.instance.getCurrentPrice(stockCode);
+      if (result != null && result['currentPrice'] != null) {
+        print('✅ 통일된 서비스 직접 호출 성공: $stockCode');
+        return result;
+      }
+    } catch (e) {
+      print('❌ 통일된 서비스 직접 호출 실패($stockCode): $e');
+    }
+    return null;
+  }
+
+  /// 거래량 데이터 강제 갱신 (해외주식 거래량 0 문제 해결)
+  Future<void> _ensureVolumeData(String stockCode, String market) async {
+    try {
+      // 해외주식만 거래량 강제 갱신 (국내주식은 실시간 거래량 정상 제공)
+      if (market != 'KOSPI' && market != 'KOSDAQ' && !RegExp(r'^[0-9]{5,6}$').hasMatch(stockCode)) {
+        print('🔄 $stockCode 해외주식 거래량 강제 갱신 시도...');
+        
+        // 1. 서버에서 거래량 데이터 확인
+        final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+        await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
+        
+        // 2. 클라이언트에서 직접 거래량 조회 (통일된 서비스 사용)
+        final result = await UnifiedStockService.instance.getCurrentPrice(stockCode);
+        
+        if (result != null && result['volume'] != null && result['volume'] > 0) {
+          print('✅ $stockCode 거래량 갱신 성공: ${result['volume']}');
+        } else {
+          print('ℹ️ $stockCode 거래량 0은 정상 (정규장 시간 외)');
+        }
+      }
+    } catch (e) {
+      print('❌ $stockCode 거래량 갱신 실패: $e');
+    }
+  }
+
+  /// 분석 데이터 강제 생성 (관심종목 분석 데이터 없음 문제 해결)
+  Future<void> _ensureAnalysisData(String stockCode, String uid) async {
+    try {
+      print('🔄 $stockCode 분석 데이터 강제 생성 시도...');
+      
+      // 1. 서버에서 차트데이터 + 분석 데이터 강제 생성 (여러 번 시도)
+      for (int attempt = 1; attempt <= 3; attempt++) {
+        print('🔄 $stockCode 서버 데이터 생성 시도 $attempt/3...');
+        final success = await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
+        if (success) {
+          print('✅ $stockCode 서버 데이터 생성 성공 (시도 $attempt)');
+          break;
+        } else {
+          print('⚠️ $stockCode 서버 데이터 생성 실패 (시도 $attempt)');
+          if (attempt < 3) {
+            await Future.delayed(Duration(seconds: attempt * 2)); // 2초, 4초 대기
+          }
+        }
+      }
+      
+      // 2. 분석 결과 확인 (AnalysisFunctionsService 사용)
+      final analysisService = AnalysisFunctionsService();
+      final analysisResult = await analysisService.analyzeStock(symbol: stockCode, days: 100);
+      
+      if (analysisResult != null && analysisResult.isNotEmpty) {
+        print('✅ $stockCode 분석 데이터 생성 성공');
+      } else {
+        print('⚠️ $stockCode 분석 데이터 생성 실패 또는 빈 결과');
+      }
+    } catch (e) {
+      print('❌ $stockCode 분석 데이터 생성 실패: $e');
     }
   }
 
@@ -837,130 +888,11 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
   /// 개별 종목의 차트 데이터 로딩
   Future<void> _loadChartDataForStock(String stockCode, String market) async {
     try {
-      final unifiedApiService = KisUnifiedApiService();
-      
-      // 나스닥 종목인지 확인 (종목코드 패턴으로도 판별)
-      final isNasdaq = market == 'NASDAQ' || market == 'NYSE' || 
-                      RegExp(r'^[A-Z]{1,5}$').hasMatch(stockCode);
-      
-      List<Map<String, dynamic>> chartData;
-      if (isNasdaq) {
-        print('🌍 나스닥 차트 데이터 조회: $stockCode');
-        // 통일 API 사용 (여러 거래소 자동 시도)
-        final rawData = await unifiedApiService.getDailyChart(
-          stockCode,
-          count: 100,
-        );
-        
-        print('🔍 [$stockCode] API 호출 결과:');
-        print('  - 응답 데이터 개수: ${rawData.length}');
-        if (rawData.isNotEmpty) {
-          print('  - 첫 번째 데이터: ${rawData.first}');
-          print('  - 마지막 데이터: ${rawData.last}');
-        } else {
-          print('  - ❌ API에서 빈 배열 반환');
-        }
-        
-        // 해외주식 데이터를 표준화된 형식으로 변환
-        chartData = rawData.map((item) {
-          // 날짜를 YYYYMMDD로 통일
-          String dateStr = (item['date'] ?? '').toString();
-          if (dateStr.contains('-')) {
-            // YYYY-MM-DD -> YYYYMMDD
-            dateStr = dateStr.replaceAll('-', '');
-          }
-          return {
-            'stock_code': stockCode,
-            'market': market,
-            'date': dateStr.isNotEmpty ? dateStr : DateTime.now().toString().substring(0, 10).replaceAll('-', ''),
-            'open': item['open'] ?? 0.0,
-            'high': item['high'] ?? 0.0,
-            'low': item['low'] ?? 0.0,
-            'close': item['close'] ?? 0.0,
-            'volume': item['volume'] ?? 0,
-            'trade_amount': 0, // 해외주식은 거래대금 정보 없음
-          };
-        }).toList();
-      } else {
-        print('🇰🇷 국내주식 차트 데이터 조회: $stockCode');
-        // @api/ 확장 파일의 메서드 사용
-        final rawData = await unifiedApiService.getDomesticDailyChart(
-          stockCode: stockCode,
-          count: 100,
-        );
-        
-        // 국내주식 데이터: 표준 키 또는 stck_* 키를 처리하고 날짜를 YYYYMMDD로 통일
-        chartData = rawData.map((item) {
-          // 날짜
-          String dateStr = (item['date'] ?? item['stck_bsop_date'] ?? '').toString();
-          if (dateStr.contains('-')) {
-            dateStr = dateStr.replaceAll('-', '');
-          }
-          // 값 파싱(표준 키 우선 → stck_* 키 폴백)
-          double open = double.tryParse((item['open'] ?? item['stck_oprc'] ?? '0').toString()) ?? 0.0;
-          double high = double.tryParse((item['high'] ?? item['stck_hgpr'] ?? '0').toString()) ?? 0.0;
-          double low  = double.tryParse((item['low']  ?? item['stck_lwpr'] ?? '0').toString()) ?? 0.0;
-          double close= double.tryParse((item['close']?? item['stck_clpr'] ?? '0').toString()) ?? 0.0;
-          int volume   = int.tryParse((item['volume'] ?? item['acml_vol'] ?? '0').toString()) ?? 0;
-          int tradeAmt = int.tryParse((item['acml_tr_pbmn'] ?? '0').toString()) ?? 0;
-
-          return {
-            'stock_code': stockCode,
-            'market': market,
-            'date': dateStr,
-            'open': open,
-            'high': high,
-            'low': low,
-            'close': close,
-            'volume': volume,
-            'trade_amount': tradeAmt,
-          };
-        }).toList();
-      }
-      
-      if (chartData.isNotEmpty) {
-        // 로컬DB에 저장 (일괄 삽입)
-        await _chartRepo.insertMultipleChartData(chartData);
-        print('✅ $stockCode 차트 데이터 저장 완료 (${chartData.length}개)');
-        // Firestore charts에 최근 N개 업서트 (뷰 전용, 용량 제한 대비 최소 필드)
-        try {
-          final List<Map<String, dynamic>> ohlcv = chartData
-              .map((e) => {
-                    'd': e['date'],
-                    'o': e['open'],
-                    'h': e['high'],
-                    'l': e['low'],
-                    'c': e['close'],
-                    'v': e['volume'],
-                  })
-              .toList();
-          final maxN = 120; // 문서 크기 보호
-          final sliced = ohlcv.length > maxN ? ohlcv.sublist(ohlcv.length - maxN) : ohlcv;
-          await FirebaseFirestore.instance.collection('charts').doc(stockCode).set({
-            'symbol': stockCode,
-            'market': market,
-            'ohlcv': sliced,
-            'updatedAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
-          print('✅ Firestore charts 업서트 완료: $stockCode (${sliced.length}개)');
-        } catch (e) {
-          print('⚠️ Firestore charts 업서트 실패: $e');
-        }
-        
-        // 저장된 데이터 샘플 출력 (PLTZ 등 나스닥 종목 확인용)
-        if (isNasdaq && chartData.length > 0) {
-          print('🔍 [$stockCode] 저장된 차트 데이터 샘플:');
-          final sample = chartData.first;
-          print('  - 날짜: ${sample['date']}');
-          print('  - 종가: ${sample['close']}');
-          print('  - 거래량: ${sample['volume']}');
-          print('  - 시가/고가/저가: ${sample['open']}/${sample['high']}/${sample['low']}');
-        }
-      } else {
-        print('⚠️ $stockCode 차트 데이터가 비어있음 - 실제 데이터만 사용');
-      }
+      // 서버 캐시 차트 조회(100일)
+      final chartData = await RemoteKisService.instance.getStockData(stockCode);
+      print('✅ 서버 차트 수신: $stockCode (${chartData.length}일)');
     } catch (e) {
-      print('❌ $stockCode 차트 데이터 로딩 실패: $e');
+      print('❌ $stockCode 차트 데이터 로딩 실패(서버): $e');
     }
   }
 
@@ -1262,6 +1194,9 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
 
   @override
   void dispose() {
+    if (_iconBounceController.isAnimating) {
+      _iconBounceController.stop();
+    }
     _iconBounceController.dispose();
     super.dispose();
   }

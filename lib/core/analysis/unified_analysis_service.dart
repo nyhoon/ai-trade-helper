@@ -318,8 +318,8 @@ class UnifiedAnalysisService {
       }
       
       // 2. 이전가 보강 (전일가 → 시가로 변경)
-      double previousPrice = (marketData['openPrice'] as double?) ?? 
-                           (marketData['prevClose'] as double?) ?? 
+      double previousPrice = (marketData['openPrice'] as num?)?.toDouble() ?? 
+                           (marketData['prevClose'] as num?)?.toDouble() ?? 
                            currentPrice;
       if (previousPrice <= 0) {
         previousPrice = currentPrice;
@@ -365,19 +365,19 @@ class UnifiedAnalysisService {
       }
       
       // 4. 기술적 지표 보강 - 기본값 사용 금지, 데이터 없으면 계산 오류 처리
-      double? rsiValue = technicalData['rsi'] as double?;
-      double? macdValue = technicalData['macd'] as double?;
-      double? signalValue = technicalData['signal'] as double?;
-      double? upperBand = technicalData['bbUpper'] as double?;
-      double? middleBand = technicalData['bbMiddle'] as double?;
-      double? lowerBand = technicalData['bbLower'] as double?;
-      double? ma5 = technicalData['ma5'] as double?;
-      double? ma20 = technicalData['ma20'] as double?;
-      double? ma60 = technicalData['ma60'] as double?;
-      double? vwapValue = technicalData['vwap'] as double?;
-      double? adxValue = technicalData['adx'] as double?;
-      double? currentATR = technicalData['atr'] as double?;
-      double? averageATR = technicalData['avgAtr'] as double?;
+      double? rsiValue = (technicalData['rsi'] as num?)?.toDouble();
+      double? macdValue = (technicalData['macd'] as num?)?.toDouble();
+      double? signalValue = (technicalData['signal'] as num?)?.toDouble();
+      double? upperBand = (technicalData['bbUpper'] as num?)?.toDouble();
+      double? middleBand = (technicalData['bbMiddle'] as num?)?.toDouble();
+      double? lowerBand = (technicalData['bbLower'] as num?)?.toDouble();
+      double? ma5 = (technicalData['ma5'] as num?)?.toDouble();
+      double? ma20 = (technicalData['ma20'] as num?)?.toDouble();
+      double? ma60 = (technicalData['ma60'] as num?)?.toDouble();
+      double? vwapValue = (technicalData['vwap'] as num?)?.toDouble();
+      double? adxValue = (technicalData['adx'] as num?)?.toDouble();
+      double? currentATR = (technicalData['atr'] as num?)?.toDouble();
+      double? averageATR = (technicalData['avgAtr'] as num?)?.toDouble();
       
       // 5. 최종 유효성 검증 및 기본값 처리 - null 값이나 NaN 값을 기본값으로 대체
       print('🔍 [UnifiedAnalysis] 기술적 지표 값 검증 및 기본값 처리:');
@@ -427,8 +427,8 @@ class UnifiedAnalysisService {
       
       // 7. 시가 보강 (API 파라미터 우선, marketData 폴백)
       double openPrice = (openPriceParam != null && openPriceParam > 0) ? openPriceParam :
-                        (marketData['openPrice'] as double?) ?? 
-                        (marketData['highPrice'] as double?) ?? 
+                        (marketData['openPrice'] as num?)?.toDouble() ?? 
+                        (marketData['highPrice'] as num?)?.toDouble() ?? 
                         currentPrice;
       if (openPrice <= 0) {
         openPrice = currentPrice;
@@ -501,7 +501,8 @@ class UnifiedAnalysisService {
             print('📊 [UnifiedAnalysis] 캐시에서 차트 데이터 사용: $stockCode (${chartData.length}개)');
           } else {
             print('📊 [UnifiedAnalysis] 통합 API에서 차트 데이터 조회: $stockCode');
-            chartData = await KisUnifiedApiService().getDailyChart(stockCode, count: ChartConstants.CHART_MIN_BARS);
+            // 서버 전환: 통일API 대신 서버 캐시 사용
+            chartData = await RemoteKisService.instance.getDailyChart(stockCode, days: ChartConstants.CHART_MIN_BARS);
             print('📊 [UnifiedAnalysis] 통합 API 응답 차트 데이터: $stockCode (${chartData.length}개)');
             
             if (chartData.isNotEmpty) {
@@ -512,8 +513,8 @@ class UnifiedAnalysisService {
             }
           }
         } else {
-          print('🇰🇷 [UnifiedAnalysis] 통합 API에서 차트 데이터 조회: $stockCode');
-          chartData = await KisUnifiedApiService().getDailyChart(stockCode, count: ChartConstants.CHART_MIN_BARS);
+          print('🇰🇷 [UnifiedAnalysis] 서버 캐시 차트 조회: $stockCode');
+          chartData = await RemoteKisService.instance.getDailyChart(stockCode, days: ChartConstants.CHART_MIN_BARS);
         }
       }
       
@@ -546,23 +547,17 @@ class UnifiedAnalysisService {
         try {
           if (isNasdaq) {
             print('🌍 [UnifiedAnalysis] 나스닥 종목 데이터 조회: $stockCode');
-            data = await KisUnifiedApiService().getOverseasStockPrice(
-              symbol: stockCode,
-              exchangeCode: 'NAS',
-            );
+            data = await RemoteKisService.instance.getCurrentPrice(stockCode);
             if (data == null || (data['prpr'] ?? 0) == 0) {
               final resolved = _resolveUsSymbol(stockCode);
               if (resolved != stockCode) {
                 print('🔁 해외 현재가 심볼 교정 재시도: $stockCode -> $resolved');
-                data = await KisUnifiedApiService().getOverseasStockPrice(
-                  symbol: resolved,
-                  exchangeCode: 'NAS',
-                );
+                data = await RemoteKisService.instance.getCurrentPrice(resolved);
               }
             }
           } else {
-            print('🇰🇷 [UnifiedAnalysis] 국내주식 데이터 조회: $stockCode');
-            data = await KisUnifiedApiService().getStockPrice(stockCode);
+          print('🇰🇷 [UnifiedAnalysis] 서버 캐시 현재가 조회: $stockCode');
+          data = await RemoteKisService.instance.getCurrentPrice(stockCode);
           }
           
           print('🔍 [UnifiedAnalysis] KIS API 응답: $data');
@@ -966,7 +961,7 @@ class UnifiedAnalysisService {
             print('📊 [UnifiedAnalysis] 로컬 DB 데이터가 오래됨 (최신: $latestDate, 오늘: $today), API 호출: $stockCode');
             // 통합 API 사용으로 자동 시장 판별 및 적절한 exchangeCode 선택
             print('🔄 [UnifiedAnalysis] 통합 API 호출: $stockCode (자동 시장 판별)');
-            chartData = await KisUnifiedApiService().getDailyChart(stockCode, count: ChartConstants.CHART_MIN_BARS);
+            chartData = await RemoteKisService.instance.getDailyChart(stockCode, days: ChartConstants.CHART_MIN_BARS);
             print('📊 [UnifiedAnalysis] 통합 API 응답: $stockCode (${chartData.length}개)');
             
             // API에서 가져온 최신 데이터를 DB에 저장
@@ -984,7 +979,7 @@ class UnifiedAnalysisService {
           print('📊 [UnifiedAnalysis] 로컬 DB에 데이터 없음, 통합 API 호출: $stockCode');
           // 통합 API 사용으로 자동 시장 판별 및 적절한 exchangeCode 선택
           print('🔄 [UnifiedAnalysis] 통합 API 호출: $stockCode (자동 시장 판별)');
-          chartData = await KisUnifiedApiService().getDailyChart(stockCode, count: ChartConstants.CHART_MIN_BARS);
+          chartData = await RemoteKisService.instance.getDailyChart(stockCode, days: ChartConstants.CHART_MIN_BARS);
           print('📊 [UnifiedAnalysis] 통합 API 응답: $stockCode (${chartData.length}개)');
           
           // API에서 가져온 데이터를 DB에 저장

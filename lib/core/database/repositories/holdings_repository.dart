@@ -25,18 +25,19 @@ class HoldingsRepository {
         batch.delete(d.reference);
       }
       for (final holding in holdings) {
-        final String pdno = (holding['pdno'] ?? '').toString();
-        if (pdno.isEmpty) continue;
-        final String prdtName = holding['prdt_name'] ?? '';
-        final int hldgQty = _parseInt(holding['hldg_qty']) ?? 0;
-        final double pchsAvgPric = _parseDouble(holding['pchs_avg_pric']) ?? 0.0;
-        final double prpr = _parseDouble(holding['prpr']) ?? 0.0;
-        final double evluAmt = _parseDouble(holding['evlu_amt']) ?? 0.0;
+        // 국내/해외 호환: stockCode가 있으면 pdno로 사용
+        final String code = (holding['pdno'] ?? holding['stockCode'] ?? '').toString();
+        if (code.isEmpty) continue;
+        final String prdtName = (holding['prdt_name'] ?? holding['stockName'] ?? '').toString();
+        final int hldgQty = _parseInt(holding['hldg_qty']) ?? _parseInt(holding['quantity']) ?? 0;
+        final double pchsAvgPric = _parseDouble(holding['pchs_avg_pric']) ?? _parseDouble(holding['avgPrice']) ?? 0.0;
+        final double prpr = _parseDouble(holding['prpr']) ?? _parseDouble(holding['currentPrice']) ?? 0.0;
+        final double evluAmt = _parseDouble(holding['evlu_amt']) ?? (hldgQty > 0 ? prpr * hldgQty : 0.0);
         final double evluPflsAmt = _parseDouble(holding['evlu_pfls_amt']) ?? 0.0;
         final double evluPflsRt = _parseDouble(holding['evlu_pfls_rt']) ?? 0.0;
-        final String resolvedMarket = _resolveMarket(pdno);
-        batch.set(_collection(uid).doc(pdno), {
-          'pdno': pdno,
+        final String resolvedMarket = _resolveMarket(code);
+        batch.set(_collection(uid).doc(code), {
+          'pdno': code,
           'prdt_name': prdtName,
           'market': resolvedMarket,
           'hldg_qty': hldgQty,

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import '../../../core/utils/stock_utils.dart';
 
 typedef IsNasdaqStock = bool Function(String stockCode);
 typedef GetIndicatorScore = double Function(String indicatorName, Map<String, dynamic> analysis);
@@ -40,9 +41,74 @@ class IntegratedAnalysisSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final double confidence = (analysis['confidence'] as num?)?.toDouble() ?? 0.0;
     final double targetPrice = (analysis['targetPrice'] as num?)?.toDouble() ?? 0.0;
-    final Map<String, dynamic> individualScores = analysis['individualScores'] as Map<String, dynamic>? ?? {};
+    final Map<String, dynamic> individualScores = Map<String, dynamic>.from((analysis['individualScores'] as Map?) ?? const {});
+    final Map<String, dynamic> analysisBlock = Map<String, dynamic>.from((analysis['analysis'] as Map?) ?? const {});
     final double comprehensiveScore = (analysis['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
     final String reason = (analysis['reason'] as String?) ?? '';
+    final Map<String, dynamic> technicalData = Map<String, dynamic>.from((analysis['technicalData'] as Map?) ?? const {});
+    final String stockCode = (analysis['stockCode'] as String?) ?? '';
+    final bool overseas = isNasdaqStock(stockCode);
+
+    // 최신 현재가 데이터(아이템에 동봉된 서버 값 우선)
+    double _toDouble(dynamic v) {
+      if (v == null) return 0.0;
+      if (v is num) return v.toDouble();
+      return double.tryParse(v.toString()) ?? 0.0;
+    }
+
+    final Map<String, dynamic> currentMap = Map<String, dynamic>.from((item['currentPriceData'] as Map?)
+      ?? (analysis['currentPriceData'] as Map?)
+      ?? (analysis['priceData'] as Map?)
+      ?? const {});
+    final double currentPriceLatest = _toDouble(
+      currentMap['currentPrice'] ?? currentMap['current_price'] ?? currentMap['prpr']
+    );
+    final double openPriceLatest = _toDouble(
+      currentMap['open'] ?? currentMap['openPrice'] ?? currentMap['open_price']
+    );
+    final double prevCloseLatest = _toDouble(
+      currentMap['prevClose'] ?? currentMap['prev_close'] ?? currentMap['previous_close'] ?? currentMap['stck_prdy_clpr']
+    );
+    final int volumeLatest = ((
+      currentMap['volume']
+        ?? currentMap['trade_volume']
+        ?? currentMap['acc_trade_volume']
+        ?? currentMap['tvol']
+        ?? currentMap['Volume']
+    ) as num?)?.toInt() ?? 0;
+
+    // 가격/거래량 값 (서버 값 우선, 기술 데이터 폴백)
+    final double currentPrice = currentPriceLatest > 0
+        ? currentPriceLatest
+        : ((analysis['currentPrice'] as num?)?.toDouble() ?? (technicalData['currentPrice'] as num?)?.toDouble() ?? 0.0);
+    final double openPrice = openPriceLatest > 0
+        ? openPriceLatest
+        : ((analysis['openPrice'] as num?)?.toDouble() ?? (technicalData['open'] as num?)?.toDouble() ?? 0.0);
+    final double prevClose = prevCloseLatest > 0
+        ? prevCloseLatest
+        : ((analysis['prevClose'] as num?)?.toDouble() ?? (technicalData['previousPrice'] as num?)?.toDouble() ?? 0.0);
+    final int currentVolume = volumeLatest > 0
+        ? volumeLatest
+        : ((technicalData['currentVolume'] as num?)?.toInt() ?? (analysis['volume'] as num?)?.toInt() ?? 0);
+    final int avgVolume = (technicalData['avgVolume'] as num?)?.toInt() ?? 0;
+
+    // 지표 값들
+    final double? rsi = (technicalData['rsi'] as num?)?.toDouble();
+    final double? macd = (technicalData['macd'] as num?)?.toDouble();
+    final double? macdSignal = (technicalData['signal'] as num?)?.toDouble();
+    final double? bbUpper = (technicalData['bbUpper'] as num?)?.toDouble();
+    final double? bbMiddle = (technicalData['bbMiddle'] as num?)?.toDouble();
+    final double? bbLower = (technicalData['bbLower'] as num?)?.toDouble();
+    final double? ma5 = (technicalData['ma5'] as num?)?.toDouble();
+    final double? ma20 = (technicalData['ma20'] as num?)?.toDouble();
+    final double? ma60 = (technicalData['ma60'] as num?)?.toDouble();
+    final double? vwap = (technicalData['vwap'] as num?)?.toDouble();
+    final double? adx = (technicalData['adx'] as num?)?.toDouble();
+
+    // 통합 가격 포맷팅 사용
+    String fmtPrice(num v) => StockUtils.instance.formatPrice(v.toDouble(), stockCode);
+    String fmtPricePlain(num v) => StockUtils.instance.formatPricePlain(v.toDouble(), stockCode);
+    String fmtVol(num v) => StockUtils.instance.formatVolume(v.toInt());
 
     return FutureBuilder<Map<String, dynamic>>(
       future: loadStyleParams(),
@@ -114,21 +180,11 @@ class IntegratedAnalysisSection extends StatelessWidget {
                             '종합점수: ${comprehensiveScore >= 0 ? '+' : ''}${comprehensiveScore.toStringAsFixed(3)}',
                             style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: signalColor),
                           ),
+                          const SizedBox(height: 4),
                         ],
                       ),
                     ),
-                    if (targetPrice > 0)
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text(
-                            isNasdaqStock(analysis['stockCode'] as String? ?? '')
-                                ? '목표가: \$${targetPrice.toStringAsFixed(2)}'
-                                : '목표가: ${NumberFormat('#,###').format(targetPrice)}원',
-                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: signalColor),
-                          ),
-                        ],
-                      ),
+                    // 우측 요약 제거: 상단 헤더(StockHeader)에서만 현재가/등락률/시가 표기
                   ],
                 ),
               ),
@@ -155,11 +211,45 @@ class IntegratedAnalysisSection extends StatelessWidget {
                   children: [
                     Row(children: [Icon(Icons.analytics, size: 16, color: signalColor), const SizedBox(width: 6), Text('기술적 지표 분석', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: signalColor))]),
                     const SizedBox(height: 6),
-                    ...individualScores.keys.map((indicatorName) {
+                    // 7개 지표 강제 표시 (individualScores가 비어있어도 표시)
+                    ..._getAllIndicators().map((indicatorName) {
                       final double score = getIndicatorScore(indicatorName, analysis);
+                      // 실제 값 텍스트(technicalData 기반)가 있다면 우측 설명에 표기되므로, 서버 미제공 시 폴백은 별도 유틸에서 처리됨
                       String signal = _getIndicatorSignal(indicatorName, score);
                       Color indicatorColor = signal == '매수' ? Colors.red : signal == '매도' ? Colors.blue : Colors.green;
                       final detailedReason = generateDetailedReason(indicatorName, score, signal, analysis);
+                      String valueLine = '';
+                      switch (indicatorName) {
+                        case 'volume':
+                          if (currentVolume > 0) {
+                            final ratio = (avgVolume > 0) ? (currentVolume / (avgVolume == 0 ? 1 : avgVolume)) : 1.0;
+                            valueLine = '거래량 ${fmtVol(currentVolume)}주 (평균의 ${ratio.toStringAsFixed(1)}배)';
+                          }
+                          break;
+                        case 'rsi':
+                          if (rsi != null) valueLine = 'RSI ${rsi.toStringAsFixed(1)}';
+                          break;
+                        case 'macd':
+                          if (macd != null && macdSignal != null) {
+                            valueLine = 'MACD ${macd.toStringAsFixed(4)} · 신호선 ${macdSignal.toStringAsFixed(4)}';
+                          }
+                          break;
+                        case 'bollinger':
+                          if (bbMiddle != null) valueLine = '중간밴드 ${fmtPricePlain(bbMiddle)}${overseas ? '' : '원'}';
+                          break;
+                        case 'movingAverage':
+                          if (ma5 != null && ma20 != null) valueLine = 'MA5 ${fmtPricePlain(ma5)}${overseas ? '' : '원'} · MA20 ${fmtPricePlain(ma20)}${overseas ? '' : '원'}';
+                          break;
+                        case 'vwap':
+                          if (vwap != null) valueLine = 'VWAP ${fmtPricePlain(vwap)}${overseas ? '' : '원'}';
+                          break;
+                        case 'adx':
+                          if (adx != null) {
+                            final double disp = adx <= 1.0 ? adx * 100.0 : adx; // 0~1 스케일 들어올 경우 보정
+                            valueLine = 'ADX ${disp.toStringAsFixed(1)}';
+                          }
+                          break;
+                      }
                       return Container(
                         margin: const EdgeInsets.only(bottom: 6),
                         padding: const EdgeInsets.all(10),
@@ -176,6 +266,7 @@ class IntegratedAnalysisSection extends StatelessWidget {
                               Text(signal, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: indicatorColor)),
                             ])),
                           ]),
+                          if (valueLine.isNotEmpty) ...[const SizedBox(height: 6), Text(valueLine, style: TextStyle(fontSize: 11, color: Colors.grey[700]))],
                           if (detailedReason.isNotEmpty) ...[const SizedBox(height: 6), Text(detailedReason, style: TextStyle(fontSize: 11, color: Colors.grey[600], height: 1.3))],
                         ]),
                       );
@@ -228,5 +319,18 @@ class IntegratedAnalysisSection extends StatelessWidget {
       default:
         return '관망';
     }
+  }
+
+  /// 7개 지표 목록 반환 (강제 표시용)
+  List<String> _getAllIndicators() {
+    return [
+      'volume',
+      'adx', 
+      'macd',
+      'vwap',
+      'rsi',
+      'bollinger',
+      'movingAverage',
+    ];
   }
 }

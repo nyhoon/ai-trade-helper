@@ -72,17 +72,64 @@ export class ChartDataService {
    * 차트 데이터 확보 보장: 부족하면 KIS에서 받아와 저장 후 재조회
    */
   static async ensureChartData(symbol: string, days: number = 100): Promise<any[]> {
-    const cur = await this.getChartData(symbol, days);
-    if (Array.isArray(cur) && cur.length >= days) return cur;
     try {
-      const fetched = await KISProxy.fetchDailyChart(symbol, days);
-      if (Array.isArray(fetched) && fetched.length > 0) {
-        await this.saveChartData(symbol, fetched);
+      // 기존 로직 유지: 먼저 오늘 캔들 보강 시도 후 최종 조회 반환
+
+      // KST 오늘 날짜 생성 (yyyyMMdd)
+      const now = new Date();
+      const kst = new Date(now.getTime() + (9 * 60 * 60 * 1000));
+      const yyyy = kst.getUTCFullYear();
+      const mm = String(kst.getUTCMonth() + 1).padStart(2, '0');
+      const dd = String(kst.getUTCDate()).padStart(2, '0');
+      const today = `${yyyy}${mm}${dd}`;
+
+      // charts/{symbol}/daily/{today}가 없고 prices/{symbol}이 있으면 임시 캔들 생성/업데이트
+      const db = admin.firestore();
+      const dailyRef = db.collection('charts').doc(symbol).collection('daily').doc(today);
+      const todaySnap = await dailyRef.get();
+
+      const priceSnap = await db.collection('prices').doc(symbol).get();
+      const price = priceSnap.exists ? (priceSnap.data() as any) : null;
+
+      if (!todaySnap.exists && price) {
+        const open = Number(price.open ?? price.open_price ?? 0) || 0;
+        const high = Number(price.high ?? price.high_price ?? 0) || 0;
+        const low = Number(price.low ?? price.low_price ?? 0) || 0;
+        const close = Number(price.currentPrice ?? price.current_price ?? price.prpr ?? 0) || 0;
+        const volume = Number(price.volume ?? 0) || 0;
+
+        const doc = {
+          date: today,
+          date_ts: Number(today),
+          open,
+          high,
+          low,
+          close,
+          volume,
+          market: price.market ?? undefined,
+          stock_code: symbol,
+          updated_at: Date.now(),
+        } as any;
+        await dailyRef.set(doc, { merge: true });
+      } else if (todaySnap.exists && price) {
+        // 장중 갱신: 고가/저가/종가/거래량을 최신 prices로 보강
+        const update: any = {};
+        if (price.high != null || price.high_price != null) update.high = Number(price.high ?? price.high_price) || 0;
+        if (price.low != null || price.low_price != null) update.low = Number(price.low ?? price.low_price) || 0;
+        if (price.currentPrice != null || price.current_price != null || price.prpr != null) update.close = Number(price.currentPrice ?? price.current_price ?? price.prpr) || 0;
+        if (price.volume != null) update.volume = Number(price.volume) || 0;
+        if (Object.keys(update).length) {
+          update.updated_at = Date.now();
+          await dailyRef.set(update, { merge: true });
+        }
       }
+
+      // 최신 데이터 재조회 (today 반영)
+      return await this.getChartData(symbol, days);
     } catch (e) {
-      console.error(`❌ KIS 차트 확보 실패: ${symbol}`, e);
+      console.error('ensureChartData 실패:', e);
+      return await this.getChartData(symbol, days);
     }
-    return await this.getChartData(symbol, days);
   }
 
   /**
@@ -99,14 +146,56 @@ export class ChartDataService {
         .doc(symbol)
         .get();
       
-      if (!doc.exists) {
-        console.log(`⚠️ 현재가 데이터 없음: ${symbol}`);
-        return null;
+      if (doc.exists) {
+        const data = doc.data();
+        console.log(`✅ 현재가 데이터 조회 완료(prices): ${symbol}`);
+        return data;
       }
-      
-      const data = doc.data();
-      console.log(`✅ 현재가 데이터 조회 완료: ${symbol}`);
-      return data;
+
+      // charts/{symbol}/daily 최신 1건을 현재가로 변환하는 폴백
+      console.log(`ℹ️ prices 미존재 → charts/daily 폴백 시도: ${symbol}`);
+      const latestDaily = await admin.firestore()
+        .collection('charts').doc(symbol).collection('daily')
+        .orderBy('date_ts', 'desc')
+        .limit(1)
+        .get();
+
+      if (!latestDaily.empty) {
+        const latest = latestDaily.docs[0].data() as any;
+        
+        // 전일 데이터 조회 (최신 2개 데이터)
+        const twoLatest = await admin.firestore()
+          .collection('charts').doc(symbol).collection('daily')
+          .orderBy('date_ts', 'desc')
+          .limit(2)
+          .get();
+        
+        let prevClose = latest?.close;
+        if (twoLatest.docs.length >= 2) {
+          const prevDay = twoLatest.docs[1].data() as any;
+          prevClose = prevDay?.close || latest?.close;
+        }
+        
+        const fallback = {
+          symbol,
+          // 서버 표준은 snake_case 유지. 클라이언트에서 camelCase로 매핑함
+          current_price: Number(latest?.close ?? 0) || 0,
+          prev_close: Number(prevClose ?? 0) || 0,
+          open_price: Number(latest?.open ?? 0) || 0,
+          high_price: Number(latest?.high ?? 0) || 0,
+          low_price: Number(latest?.low ?? 0) || 0,
+          volume: Number(latest?.volume ?? 0) || 0,
+          timestamp: Number(latest?.date_ts ?? 0) || 0,
+          market: latest?.market ?? undefined,
+          stock_name: latest?.stock_name ?? undefined,
+        } as any;
+
+        console.log(`✅ 현재가 데이터 조회 완료(charts 폴백): ${symbol}`);
+        return fallback;
+      }
+
+      console.log(`⚠️ 현재가/차트 데이터 모두 없음: ${symbol}`);
+      return null;
       
     } catch (error) {
       console.error(`❌ 현재가 데이터 조회 실패: ${symbol}`, error);

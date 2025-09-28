@@ -33,28 +33,8 @@ class StockInfoHeaderWidget extends StatelessWidget {
     final highPrice = _toDouble(stockData['high']) ?? 0.0;
     final lowPrice = _toDouble(stockData['low']) ?? 0.0;
     // 거래량: 다중 소스 폴백 (API→캐시→차트)
-    double volume = _toDouble(stockData['acml_vol']) ?? 0.0;
-    if (volume <= 0) {
-      final cachedData = AppDataManager.instance.getCachedStockData(stockCode);
-      final cachedVol = _toDouble(cachedData['acml_vol'])
-          + _toDouble(cachedData['volume']);
-      if (cachedVol > 0) {
-        volume = cachedVol;
-        print('🔍 [StockInfoHeader] 거래량 캐시 폴백 사용: $volume');
-      } else {
-        try {
-          final cachedChart = AppDataManager.instance.getCachedChartData(stockCode);
-          if (cachedChart.isNotEmpty) {
-            final last = cachedChart.last;
-            final chartVol = _toDouble(last['volume']);
-            if (chartVol > 0) {
-              volume = chartVol;
-              print('🔍 [StockInfoHeader] 거래량 차트 폴백 사용: $volume');
-            }
-          }
-        } catch (_) {}
-      }
-    }
+    // 개선된 거래량 데이터 조회 로직
+    double volume = _getCurrentVolume(stockCode, stockData);
     final market = (stockData['market']?.toString().toUpperCase() ?? '');
     final exchange = (stockData['exchange']?.toString().toUpperCase() ?? '');
     final bool isNasdaq = _isNasdaqStock(stockCode) || market == 'NASDAQ' || exchange == 'NAS';
@@ -242,6 +222,61 @@ class StockInfoHeaderWidget extends StatelessWidget {
         ),
       ],
     );
+  }
+
+  /// 개선된 거래량 데이터 조회 로직 (차트 데이터 우선)
+  double _getCurrentVolume(String stockCode, Map<String, dynamic> stockData) {
+    // 1. 통합된 데이터에서 거래량 확인 (이미 차트 데이터가 통합됨)
+    double volume = _toDouble(stockData['volume']) ?? 0.0;
+    
+    if (volume <= 0) {
+      // 2. 캐시된 통합 데이터 확인
+      final cachedData = AppDataManager.instance.getCachedStockData(stockCode);
+      volume = _toDouble(cachedData['volume']) ?? 0.0;
+      
+      if (volume > 0) {
+        print('🔍 [StockInfoHeader] 통합 데이터 거래량 사용: $volume');
+      } else {
+        // 3. 차트 데이터에서 최신 거래량 확인 (폴백)
+        try {
+          final cachedChart = AppDataManager.instance.getCachedChartData(stockCode);
+          if (cachedChart.isNotEmpty) {
+            // 최신 거래일 데이터 확인
+            final today = DateTime.now();
+            final todayStr = '${today.year}${today.month.toString().padLeft(2, '0')}${today.day.toString().padLeft(2, '0')}';
+            
+            // 오늘 날짜 데이터 우선 확인
+            for (final chartData in cachedChart.reversed) {
+              final chartDate = chartData['date']?.toString() ?? '';
+              if (chartDate == todayStr) {
+                final chartVol = _toDouble(chartData['volume']);
+                if (chartVol > 0) {
+                  volume = chartVol;
+                  print('🔍 [StockInfoHeader] 오늘 거래량 사용: $volume (날짜: $chartDate)');
+                  break;
+                }
+              }
+            }
+            
+            // 오늘 데이터가 없으면 최신 데이터 사용
+            if (volume <= 0) {
+              final last = cachedChart.last;
+              final chartVol = _toDouble(last['volume']);
+              if (chartVol > 0) {
+                volume = chartVol;
+                print('🔍 [StockInfoHeader] 최신 거래량 사용: $volume');
+              }
+            }
+          }
+        } catch (e) {
+          print('❌ [StockInfoHeader] 거래량 조회 실패: $e');
+        }
+      }
+    } else {
+      print('🔍 [StockInfoHeader] 통합 데이터 거래량 사용: $volume');
+    }
+    
+    return volume;
   }
 
   double _toDouble(dynamic value) {

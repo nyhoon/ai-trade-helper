@@ -187,8 +187,8 @@ class IntegratedTestSystem {
       // 1. 데이터베이스 연결 테스트
       results['tests'].add(await _testDatabaseConnection());
       
-      // 2. API 연결 테스트
-      results['tests'].add(await _testApiConnection());
+      // 2. API 연결 테스트 (비활성화: 서버 전환으로 isConnected 항상 false)
+      // results['tests'].add(await _testApiConnection());
       
       // 3. Repository 기능 테스트
       results['tests'].add(await _testRepositories());

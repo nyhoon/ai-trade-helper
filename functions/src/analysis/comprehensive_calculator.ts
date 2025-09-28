@@ -80,7 +80,10 @@ export class ComprehensiveIndicatorCalculator {
       // 4. 신호 강도 분석
       const signalStrength = this.analyzeSignalStrength(comprehensiveScore);
       
-      // 5. 상세 분석 결과 생성
+      // 5. 실제 기술적 지표 값들 계산
+      const technicalData = await this.calculateTechnicalData(params);
+      
+      // 6. 상세 분석 결과 생성
       const result: AnalysisResult = {
         symbol: params.symbol,
         comprehensiveScore,
@@ -104,6 +107,7 @@ export class ComprehensiveIndicatorCalculator {
           vwap: { score: vwapScore, weight: this.INDICATOR_WEIGHTS.vwap },
           adx: { score: adxScore, weight: this.INDICATOR_WEIGHTS.adx }
         },
+        technicalData,
         timestamp: Date.now()
       };
       
@@ -167,6 +171,245 @@ export class ComprehensiveIndicatorCalculator {
       return '매우 약한 신호';
     }
   }
+
+  /**
+   * 실제 기술적 지표 값들 계산
+   */
+  private static async calculateTechnicalData(params: {
+    symbol: string;
+    chartData: any[];
+    currentPrice: any;
+    currentTime: string;
+  }): Promise<any> {
+    try {
+      const { chartData, currentPrice } = params;
+      
+      // 차트 데이터에서 가격 추출
+      const prices = chartData
+        .slice(-60) // 최근 60일
+        .map(data => data.close || data.current_price)
+        .filter(price => price > 0);
+      
+      const volumes = chartData
+        .slice(-60)
+        .map(data => data.volume || 0)
+        .filter(vol => vol > 0);
+      
+      if (prices.length < 20) {
+        console.log(`⚠️ 차트 데이터 부족: ${params.symbol} (${prices.length}개)`);
+        return {};
+      }
+      
+      // RSI 계산
+      const rsi = this.calculateRSI(prices);
+      
+      // MACD 계산
+      const macd = this.calculateMACD(prices);
+      const macdSignal = this.calculateMACDSignal(prices);
+      const macdHistogram = macd - macdSignal;
+      
+      // 볼린저밴드 계산
+      const bollinger = this.calculateBollingerBands(prices);
+      
+      // 이동평균 계산
+      const ma5 = this.calculateMA(prices, 5);
+      const ma20 = this.calculateMA(prices, 20);
+      const ma60 = this.calculateMA(prices, 60);
+      
+      // VWAP 계산
+      const vwap = this.calculateVWAP(chartData.slice(-20));
+      
+      // ADX 계산
+      const adx = this.calculateADX(chartData.slice(-20));
+      
+      // 거래량 정보 (실시간 데이터 우선)
+      const currentVolume = currentPrice.volume || volumes[volumes.length - 1] || 0;
+      const avgVolume = volumes.length > 0 ? volumes.reduce((a, b) => a + b, 0) / volumes.length : currentVolume;
+      
+      // 실시간 가격 데이터 우선 사용
+      const realTimePrice = currentPrice.currentPrice || currentPrice.current_price || prices[prices.length - 1];
+      const realTimeOpen = currentPrice.open || currentPrice.open_price || chartData[chartData.length - 1]?.open;
+      const realTimeHigh = currentPrice.high || currentPrice.high_price || chartData[chartData.length - 1]?.high;
+      const realTimeLow = currentPrice.low || currentPrice.low_price || chartData[chartData.length - 1]?.low;
+      
+      return {
+        rsi,
+        macd,
+        signal: macdSignal,
+        histogram: macdHistogram,
+        bbUpper: bollinger.upper,
+        bbMiddle: bollinger.middle,
+        bbLower: bollinger.lower,
+        ma5,
+        ma20,
+        ma60,
+        vwap,
+        adx,
+        currentVolume,
+        avgVolume,
+        currentPrice: realTimePrice,
+        openPrice: realTimeOpen,
+        highPrice: realTimeHigh,
+        lowPrice: realTimeLow,
+        previousPrice: prices.length >= 2 ? prices[prices.length - 2] : prices[prices.length - 1]
+      };
+      
+    } catch (error) {
+      console.error('❌ 기술적 지표 값 계산 실패:', error);
+      return {};
+    }
+  }
+
+  /**
+   * RSI 계산
+   */
+  private static calculateRSI(prices: number[], period: number = 14): number {
+    if (prices.length < period + 1) return 50;
+    
+    let gains = 0;
+    let losses = 0;
+    
+    for (let i = 1; i <= period; i++) {
+      const change = prices[i] - prices[i - 1];
+      if (change > 0) {
+        gains += change;
+      } else {
+        losses += Math.abs(change);
+      }
+    }
+    
+    const avgGain = gains / period;
+    const avgLoss = losses / period;
+    
+    if (avgLoss === 0) return 100;
+    
+    const rs = avgGain / avgLoss;
+    return 100 - (100 / (1 + rs));
+  }
+
+  /**
+   * MACD 계산
+   */
+  private static calculateMACD(prices: number[], fastPeriod: number = 12, slowPeriod: number = 26): number {
+    if (prices.length < slowPeriod) return 0;
+    
+    const ema12 = this.calculateEMA(prices.slice(-slowPeriod), fastPeriod);
+    const ema26 = this.calculateEMA(prices.slice(-slowPeriod), slowPeriod);
+    
+    return ema12 - ema26;
+  }
+
+  /**
+   * MACD 시그널 계산
+   */
+  private static calculateMACDSignal(prices: number[], signalPeriod: number = 9): number {
+    if (prices.length < signalPeriod + 26) return 0;
+    
+    const macdValues = [];
+    for (let i = 26; i < prices.length; i++) {
+      const macd = this.calculateMACD(prices.slice(0, i + 1));
+      macdValues.push(macd);
+    }
+    
+    if (macdValues.length < signalPeriod) return 0;
+    
+    return this.calculateEMA(macdValues.slice(-signalPeriod), signalPeriod);
+  }
+
+  /**
+   * 볼린저밴드 계산
+   */
+  private static calculateBollingerBands(prices: number[], period: number = 20, stdDev: number = 2): any {
+    if (prices.length < period) {
+      const lastPrice = prices[prices.length - 1] || 0;
+      return { upper: lastPrice * 1.02, middle: lastPrice, lower: lastPrice * 0.98 };
+    }
+    
+    const recentPrices = prices.slice(-period);
+    const sma = recentPrices.reduce((a, b) => a + b, 0) / period;
+    
+    const variance = recentPrices.reduce((sum, price) => sum + Math.pow(price - sma, 2), 0) / period;
+    const stdDeviation = Math.sqrt(variance);
+    
+    return {
+      upper: sma + (stdDeviation * stdDev),
+      middle: sma,
+      lower: sma - (stdDeviation * stdDev)
+    };
+  }
+
+  /**
+   * 이동평균 계산
+   */
+  private static calculateMA(prices: number[], period: number): number {
+    if (prices.length < period) return prices[prices.length - 1] || 0;
+    
+    const recentPrices = prices.slice(-period);
+    return recentPrices.reduce((a, b) => a + b, 0) / period;
+  }
+
+  /**
+   * VWAP 계산
+   */
+  private static calculateVWAP(chartData: any[]): number {
+    if (chartData.length === 0) return 0;
+    
+    let totalVolume = 0;
+    let totalValue = 0;
+    
+    for (const data of chartData) {
+      const price = (data.high + data.low + data.close) / 3; // 전형가
+      const volume = data.volume || 0;
+      
+      totalValue += price * volume;
+      totalVolume += volume;
+    }
+    
+    return totalVolume > 0 ? totalValue / totalVolume : 0;
+  }
+
+  /**
+   * ADX 계산 (간단한 버전)
+   */
+  private static calculateADX(chartData: any[]): number {
+    if (chartData.length < 14) return 0;
+    
+    // 간단한 ADX 계산 (실제로는 더 복잡함)
+    let totalRange = 0;
+    let totalVolume = 0;
+    
+    for (const data of chartData) {
+      const range = (data.high || 0) - (data.low || 0);
+      const volume = data.volume || 0;
+      
+      totalRange += range;
+      totalVolume += volume;
+    }
+    
+    if (totalVolume === 0) return 0;
+    
+    const avgRange = totalRange / chartData.length;
+    const avgVolume = totalVolume / chartData.length;
+    
+    // 간단한 ADX 근사값
+    return Math.min(50, (avgRange / avgVolume) * 100);
+  }
+
+  /**
+   * EMA 계산
+   */
+  private static calculateEMA(prices: number[], period: number): number {
+    if (prices.length === 0) return 0;
+    
+    const multiplier = 2 / (period + 1);
+    let ema = prices[0];
+    
+    for (let i = 1; i < prices.length; i++) {
+      ema = (prices[i] * multiplier) + (ema * (1 - multiplier));
+    }
+    
+    return ema;
+  }
 }
 
 /**
@@ -179,5 +422,6 @@ export interface AnalysisResult {
   signalStrength: string;
   individualScores: Record<string, number>;
   analysis: Record<string, { score: number; weight: number }>;
+  technicalData?: any;
   timestamp: number;
 }

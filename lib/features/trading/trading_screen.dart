@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../core/state/trading_bloc.dart';
 import '../../core/data/app_data_manager.dart';
 import '../../core/widgets/gradient_app_bar.dart';
@@ -7,6 +8,9 @@ import '../../core/trading/watchlist_manager.dart';
 import '../../core/trading/investment_style_manager.dart';
 import '../../core/trading/investment_style.dart';
 import 'dart:async';
+import 'package:firebase_auth/firebase_auth.dart';
+import '../../core/remote/remote_kis_service.dart';
+import '../../core/api/unified_stock_service.dart';
 import 'watchlist_dialog.dart';
 import 'stock_selection_dialog.dart';
 import '../settings/investment_style_settings_screen.dart';
@@ -55,6 +59,8 @@ class _TradingScreenViewState extends State<TradingScreenView> {
 
   // 타이머
   Timer? _refreshTimer;
+  Timer? _priceEnsureTimer; // 10초마다 현재가 갱신
+  Timer? _chartEnsureTimer; // 30분마다 차트 갱신
   bool _isRefreshing = false;
 
   String get _selectedStock => _selectedStockCode;
@@ -139,6 +145,8 @@ class _TradingScreenViewState extends State<TradingScreenView> {
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _priceEnsureTimer?.cancel();
+    _chartEnsureTimer?.cancel();
     super.dispose();
   }
 
@@ -211,6 +219,136 @@ class _TradingScreenViewState extends State<TradingScreenView> {
         }
       }
     });
+
+    // 현재가 10초 보장 트리거 (관심/보유/현재 보고있는 종목)
+    _priceEnsureTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
+      try {
+        final uid = FirebaseAuth.instance.currentUser?.uid;
+        if (uid == null) return;
+        final symbols = await _collectSymbols();
+        symbols.add(_selectedStock);
+        
+        for (final code in symbols) {
+          // 강제로 최신 데이터 조회 (캐시 무시)
+          await _forceRefreshCurrentPrice(code, uid);
+        }
+      } catch (e) {
+        print('⚠️ 10초 현재가 보장 트리거 실패: $e');
+      }
+    });
+
+    // 차트 30분 보장 트리거 (관심/보유/현재 보고있는 종목)
+    _chartEnsureTimer = Timer.periodic(const Duration(minutes: 30), (timer) async {
+      try {
+        final uid = FirebaseAuth.instance.currentUser?.uid;
+        if (uid == null) return;
+        final symbols = await _collectSymbols();
+        symbols.add(_selectedStock);
+        for (final code in symbols) {
+          await UnifiedStockService.instance.getDailyChart(code, uid: uid); // 통일된 서비스 사용
+        }
+      } catch (e) {
+        print('⚠️ 30분 차트 보장 트리거 실패: $e');
+      }
+    });
+  }
+
+  Future<Set<String>> _collectSymbols() async {
+    final set = <String>{};
+    try {
+      final watchlistData = await _appDataManager.getWatchlistWithScores();
+      for (final it in watchlistData) {
+        final code = it['stock_code'] ?? it['stockCode'];
+        if (code is String && code.isNotEmpty) set.add(code);
+      }
+      final holdings = await _appDataManager.holdingsRepository.getHoldings();
+      for (final it in holdings) {
+        final code = it['pdno'] ?? it['stockCode'] ?? it['stock_code'];
+        if (code is String && code.isNotEmpty) set.add(code);
+      }
+    } catch (_) {}
+    return set;
+  }
+
+  /// 강제 최신 데이터 조회 (캐시 무시)
+  Future<void> _forceRefreshCurrentPrice(String stockCode, String uid) async {
+    try {
+      print('🔄 강제 현재가 조회 시작: $stockCode');
+      
+      // 1. 실시간 현재가 조회 (가격 정보)
+      final priceData = await RemoteKisService.instance.getCurrentPrice(stockCode, uid: uid);
+      
+      if (priceData != null && priceData.isNotEmpty) {
+        // 2. 거래량 우선순위: tvol (총 거래량) > 차트 데이터 > acml_vol (누적 거래량)
+        final tvol = _toInt(priceData['tvol']);
+        final chartVolume = await _getLatestVolumeFromChart(stockCode);
+        final acmlVol = _toInt(priceData['acml_vol']);
+        
+        // tvol이 있으면 우선 사용, 없으면 차트 데이터, 마지막으로 acml_vol
+        final volume = tvol > 0 ? tvol : (chartVolume > 0 ? chartVolume.toInt() : acmlVol);
+        
+        // 3. 통합 데이터 생성 (가격 + 거래량)
+        final integratedData = {
+          ...priceData,
+          'volume': volume, // 우선순위에 따른 거래량 사용
+        };
+        
+        print('🔍 [거래탭] 거래량 데이터: tvol=$tvol, 차트=$chartVolume, acml_vol=$acmlVol, 최종=$volume');
+        
+        // 4. 캐시 강제 업데이트
+        _appDataManager.updateCurrentPrice(stockCode, integratedData);
+        
+        // 5. UI 상태 업데이트 (거래탭에서만)
+        if (mounted && stockCode == _selectedStock) {
+          setState(() {
+            // UI 강제 업데이트
+          });
+        }
+        
+        print('📊 강제 현재가 업데이트 완료: $stockCode (거래량: $chartVolume)');
+      } else {
+        print('⚠️ 강제 현재가 조회 실패: $stockCode - 데이터 없음');
+      }
+    } catch (e) {
+      print('❌ 강제 현재가 업데이트 실패: $stockCode - $e');
+    }
+  }
+
+  /// 안전한 정수 변환
+  int _toInt(dynamic value) {
+    if (value == null) return 0;
+    if (value is int) return value;
+    if (value is double) return value.toInt();
+    if (value is String) return int.tryParse(value) ?? 0;
+    return 0;
+  }
+
+  /// 차트 데이터에서 최신 거래일 거래량 조회
+  Future<double> _getLatestVolumeFromChart(String stockCode) async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('charts')
+          .doc(stockCode)
+          .collection('daily')
+          .orderBy('date_ts', descending: true)
+          .limit(1)
+          .get();
+      
+      if (snapshot.docs.isNotEmpty) {
+        final latestData = snapshot.docs.first.data();
+        final volume = (latestData['volume'] as num?)?.toDouble() ?? 0.0;
+        final date = latestData['date'] ?? '';
+        
+        print('📊 최신 거래일 거래량: $date - $volume');
+        return volume;
+      } else {
+        print('⚠️ 차트 데이터 없음: $stockCode');
+        return 0.0;
+      }
+    } catch (e) {
+      print('❌ 차트 데이터 조회 실패: $stockCode - $e');
+      return 0.0;
+    }
   }
 
   /// 자동매매 토글

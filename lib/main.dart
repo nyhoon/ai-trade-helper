@@ -31,9 +31,12 @@ import 'features/onboarding/api_key_setup_screen.dart';
 import 'core/testing/integration_smoke_tests.dart';
 import 'core/data/etl_migration_service.dart';
 import 'core/remote/analysis_functions_service.dart';
+import 'core/remote/credentials_service.dart';
+import 'core/api/global_api_credentials.dart';
 
 Future<void> pingFirestoreOnce() async {
-  final docRef = FirebaseFirestore.instance.collection('app_health').doc('ping');
+  // 보안 규칙 허용 경로로 변경(logs/ping)
+  final docRef = FirebaseFirestore.instance.collection('logs').doc('ping');
   await docRef.set({'ts': DateTime.now().toIso8601String()}, SetOptions(merge: true));
   await docRef.get();
 }
@@ -53,23 +56,29 @@ void main() async {
       print('❌ 웹용 데이터베이스 초기화 실패: $e');
     }
   }
-  
-  // 먼저 앱을 실행해서 즉시 스플래시가 렌더링되도록 함
-  runApp(const MyApp());
-
-  // 나머지 초기화는 스플래시에서 진행되므로 여기서는 최소화
+  /*
+   * 참고용 샘플 데이터(주석 처리):
+   * close: 21850
+   * date: "20250924"
+   * date_ts: 20250924
+   * high: 22100
+   * low: 21600
+   * market: "KOSPI"
+   * open: 22100
+   * stock_code: "001060"
+   * trade_amount: null
+   * updated_at: "2025-09-25T01:07:17+09:00"
+   * volume: 58660
+   */
+  // 초기화 순서: Firebase → Auth → runApp
   try {
     print('🚀 main() 경량 초기화 시작');
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
     print('✅ Firebase initialize 완료');
-    // 디버그 환경에서 서버 분석 스모크 테스트 1회 실행
-    assert(() {
-      IntegrationSmokeTests.runOnce();
-      return true;
-    }());
-    // 인증(익명 로그인) - Firestore 쓰기 권한 확보용 (채널 초기화 이슈 대비 재시도)
+    // 스모크 테스트는 일시 중지(초기 권한/네트워크 의존 제거)
+    // 인증: 데모 모드일 때만 익명 로그인. 일반 모드에서도 Firestore 접근을 위해 최소 로그인은 필요
     Future<void> _signInAnonWithRetry({int maxRetries = 3}) async {
       for (int attempt = 1; attempt <= maxRetries; attempt++) {
         try {
@@ -83,7 +92,21 @@ void main() async {
         }
       }
     }
-    await _signInAnonWithRetry();
+    // 데모 모드 확인
+    bool demoMode = false;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      demoMode = prefs.getBool('demo_mode') ?? false;
+    } catch (_) {}
+
+    if (FirebaseAuth.instance.currentUser == null) {
+      await _signInAnonWithRetry();
+    } else if (demoMode) {
+      // 데모 모드가 아니면 그대로 유지 (이미 로그인이면 유지)
+      print('ℹ️ 데모 모드: ${demoMode ? 'ON' : 'OFF'}');
+    }
+
+    // 서버 자격 저장은 ApiConfig 초기화 후, 아래에서 수행
     // 일회성 로컬DB → Firestore 마이그레이션 실행 플래그
     const bool kRunFirestoreMigrationOnce = false; // ETL 수동 실행 권장
     if (kRunFirestoreMigrationOnce) {
@@ -114,7 +137,82 @@ void main() async {
     }
     await pingFirestoreOnce();
     print('✅ Firestore ping 완료');
+    
+    // 전역 API 자격증명 초기화
+    print('🔐 [main.dart] 전역 API 자격증명 초기화 시작...');
+    await GlobalApiCredentials.instance.initialize();
+    GlobalApiCredentials.instance.printDebugInfo();
+    
     await ApiConfig.instance.initialize();
+    // ApiConfig가 유효하면 서버에 자격 저장(한 번 보장)
+    if (!demoMode) {
+      try {
+        final uid = FirebaseAuth.instance.currentUser?.uid;
+        final cfg = ApiConfig.instance;
+        if (uid != null && cfg.isValid) {
+          print('🔄 [main.dart] API 자격 저장 시작...');
+          print('  - UID: $uid');
+          print('  - AppKey: ${cfg.appKey?.substring(0, 10)}...');
+          print('  - AccountNo: ${cfg.accountNo}');
+          
+          bool saved = false;
+          
+          // 1. 서버 Functions 시도 (3초 타임아웃)
+          try {
+            final ok = await CredentialsService.instance.saveApiCredentials(
+              uid: uid,
+              appKey: cfg.appKey ?? '',
+              appSecret: cfg.appSecret ?? '',
+              accountNo: cfg.accountNo ?? '',
+            ).timeout(const Duration(seconds: 3));
+            
+            if (ok) {
+              print('✅ 서버에 API 자격 저장 완료');
+              saved = true;
+            } else {
+              print('❌ 서버 자격 저장 실패');
+            }
+          } catch (e) {
+            print('❌ 서버 Functions 타임아웃/실패: $e');
+          }
+          
+          // 2. 서버 실패 시 클라이언트 직접 저장
+          if (!saved) {
+            print('🔄 클라이언트 직접 저장 시도...');
+            try {
+              await FirebaseFirestore.instance
+                  .collection('users')
+                  .doc(uid)
+                  .collection('settings')
+                  .doc('api')
+                  .set({
+                'appKey': cfg.appKey ?? '',
+                'appSecret': cfg.appSecret ?? '',
+                'accountNo': cfg.accountNo ?? '',
+                'isConfigured': true,
+                'updatedAt': DateTime.now().millisecondsSinceEpoch,
+              }).timeout(const Duration(seconds: 5));
+              print('✅ 클라이언트 직접 API 자격 저장 완료');
+              saved = true;
+            } catch (e) {
+              print('❌ 클라이언트 직접 저장도 실패: $e');
+            }
+          }
+          
+          // 3. 모든 저장 실패 시에도 앱 계속 진행
+          if (!saved) {
+            print('⚠️ API 자격 저장 실패했지만 앱 계속 진행 (로컬 설정 사용)');
+          }
+        } else {
+          print('ℹ️ 서버 자격 저장 생략: uid 또는 ApiConfig 무효');
+          print('  - UID: $uid');
+          print('  - isValid: ${cfg.isValid}');
+        }
+      } catch (e) {
+        print('⚠️ 서버 API 자격 저장 중 오류: $e');
+        print('⚠️ 오류 발생했지만 앱 계속 진행');
+      }
+    }
     await AppDataManager.instance.initialize();
     await BackgroundTradingService().initialize();
     await LocalNotificationManager().initialize();
@@ -150,9 +248,13 @@ void main() async {
 
     
     print('✅ main() 경량 초기화 완료');
+    // 모든 필수 초기화 이후 UI 시작
+    runApp(const MyApp());
   } catch (e, stackTrace) {
     print('❌ main() 경량 초기화 실패: $e');
     print('스택 트레이스: $stackTrace');
+    // 실패해도 UI는 표시
+    runApp(const MyApp());
   }
 }
 
@@ -300,14 +402,12 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
             try {
               return TradingBloc(
                 appDataManager: AppDataManager.instance,
-                unifiedApiService: KisUnifiedApiService(),
               );
             } catch (e) {
               print('⚠️ TradingBloc 생성 실패: $e');
               // 기본 API 서비스로 생성
               return TradingBloc(
                 appDataManager: AppDataManager.instance,
-                unifiedApiService: KisUnifiedApiService(),
               );
             }
           },

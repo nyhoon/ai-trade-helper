@@ -13,6 +13,9 @@ import 'dart:convert';
 import 'dart:math';
 import '../../core/api/kis_unified_api_service.dart';
 import '../../core/remote/remote_kis_service.dart';
+import '../../core/api/unified_stock_service.dart';
+import '../../core/utils/stock_utils.dart';
+import '../../core/analysis/technical_indicators.dart';
 import '../../core/remote/analysis_functions_service.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../../core/data/app_data_manager.dart';
@@ -59,6 +62,7 @@ import 'widgets/investment_style_info.dart';
 import 'widgets/no_api_message.dart';
 import 'widgets/analysis_item.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class AnalysisScreen extends StatefulWidget {
   const AnalysisScreen({super.key});
@@ -68,6 +72,10 @@ class AnalysisScreen extends StatefulWidget {
 }
 
 class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStateMixin {
+  // 서버 전용 모드: 클라이언트 폴백 분석 비활성화
+  static const bool _SERVER_ONLY_MODE = true;
+  Timer? _priceEnsureTimer; // 10초 현재가 보장
+  Timer? _chartEnsureTimer; // 30분 차트 보장
   // KisApiService 제거됨 - KisUnifiedApiService 사용
   final KisUnifiedApiService _unifiedApiService = KisUnifiedApiService();
   final AnalysisFunctionsService _analysisFunctionsService = AnalysisFunctionsService();
@@ -75,6 +83,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
   final InvestmentStyleManager _styleManager = InvestmentStyleManager();
   final UnifiedStockDataManager _unifiedDataManager = UnifiedStockDataManager.instance;
   bool _isAutoTradingEnabled = false;
+  String _focusedStockCode = '';
   
   // 탭 컨트롤러
   late TabController _tabController;
@@ -85,6 +94,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
   List<Map<String, dynamic>> _recommendedStocks = [];
   Map<String, Map<String, dynamic>> _currentPrices = {};
   Map<String, Map<String, dynamic>> _analysisResults = {};
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _analysisSub;
   
   // 캐시된 실시간 데이터
   Map<String, Map<String, dynamic>> _watchlistDataCache = {};
@@ -187,6 +197,72 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
     
     // 초기화
     _initializeData();
+
+    // 서버 전용 모드: 사용자 분석 스냅샷 구독 시작
+    if (_SERVER_ONLY_MODE) {
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid != null) {
+        _analysisSub = FirebaseFirestore.instance
+            .collection('users').doc(uid)
+            .collection('analysis')
+            .snapshots()
+            .listen((snap) {
+          final Map<String, Map<String, dynamic>> next = {};
+          for (final d in snap.docs) {
+            final data = d.data();
+            next[d.id] = Map<String, dynamic>.from(data);
+          }
+          if (mounted) {
+            setState(() {
+              _analysisResults = next;
+            });
+          }
+        });
+
+        // 진입 즉시 1회 최신화 요청 (현재가/차트 모두 서버 보장 경유)
+        unawaited(_ensureLatestOnce(uid));
+
+        // 현재가 10초 보장
+        _priceEnsureTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
+          try {
+            final codes = await _collectTargetSymbols(uid);
+            for (final code in codes) {
+              final priceData = await UnifiedStockService.instance.getCurrentPrice(code, uid: uid);
+              if (priceData != null && priceData.isNotEmpty && mounted) {
+                // 실시간 데이터를 UI에 즉시 반영
+                setState(() {
+                  // _analysisResults에 실시간 데이터 추가
+                  if (_analysisResults.containsKey(code)) {
+                    _analysisResults[code]!['currentPriceData'] = priceData;
+                    _analysisResults[code]!['lastUpdated'] = DateTime.now().millisecondsSinceEpoch;
+                  } else {
+                    // _analysisResults에 없는 경우 새로 생성 (해외주식용)
+                    _analysisResults[code] = {
+                      'currentPriceData': priceData,
+                      'lastUpdated': DateTime.now().millisecondsSinceEpoch,
+                    };
+                    print('🆕 [분석탭] 새 종목 실시간 데이터 추가: $code - ${priceData['currentPrice']}');
+                  }
+                });
+                print('🔄 [분석탭] 실시간 데이터 UI 반영: $code - ${priceData['currentPrice']}');
+              }
+            }
+          } catch (e) {
+            print('❌ [분석탭] 실시간 데이터 UI 반영 실패: $e');
+          }
+        });
+
+        // 차트 30분 보장
+        _chartEnsureTimer = Timer.periodic(const Duration(minutes: 30), (timer) async {
+          try {
+            final codes = await _collectTargetSymbols(uid);
+            for (final code in codes) {
+              await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: code);
+            }
+          } catch (_) {}
+        });
+      }
+    }
     
     // 전달받은 탭 인덱스가 있으면 해당 탭으로 이동
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -249,8 +325,10 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
         setState(() {
           _watchlistItems = newWatchlist;
         });
-        // 새로운 종목들 즉시 분석
-        _analyzeNewWatchlistItems(newWatchlist);
+    // 서버 전용 모드에서는 즉시 분석 비활성화 (서버 스냅샷 대기)
+    if (!_SERVER_ONLY_MODE) {
+      _analyzeNewWatchlistItems(newWatchlist);
+    }
       }
     });
     
@@ -263,8 +341,13 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
       }
     });
     
-    _startRealTimeAnalysis();
-    _startQuickUpdateTimer();
+    // 서버 전용 모드에서는 로컬 실시간 분석 중지
+    if (!_SERVER_ONLY_MODE) {
+      _startRealTimeAnalysis();
+    }
+    if (!_SERVER_ONLY_MODE) {
+      _startQuickUpdateTimer();
+    }
     _startCleanupTimer();
     // 추천종목 자동 업데이트는 전용 화면에서만 수행 (중복/깜빡임 방지)
     // _startRecommendedStocksUpdateTimer();
@@ -293,8 +376,68 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
     _checkAutoTradingStatus();
   }
 
+  /// 차트 데이터에서 최신 거래일 거래량 조회 (강제 갱신)
+  Future<double> _getLatestVolumeFromChart(String stockCode) async {
+    try {
+      print('🔍 [분석탭] 차트 데이터 조회 시작: $stockCode');
+      
+      final snapshot = await FirebaseFirestore.instance
+          .collection('charts')
+          .doc(stockCode)
+          .collection('daily')
+          .orderBy('date_ts', descending: true)
+          .limit(1)
+          .get();
+      
+      if (snapshot.docs.isNotEmpty) {
+        final latestData = snapshot.docs.first.data();
+        final volume = (latestData['volume'] as num?)?.toDouble() ?? 0.0;
+        final date = latestData['date'] ?? '';
+        print('📊 [분석탭] 최신 거래일 거래량: $date - $volume');
+        return volume;
+      } else {
+        print('⚠️ [분석탭] 차트 데이터 없음: $stockCode');
+        return 0.0;
+      }
+    } catch (e) {
+      print('❌ [분석탭] 차트 데이터 조회 실패: $stockCode - $e');
+      return 0.0;
+    }
+  }
+
+  /// 강제 차트 데이터 갱신 (캐시 무시)
+  Future<void> _forceRefreshChartData(List<String> stockCodes) async {
+    try {
+      print('🔄 [분석탭] 강제 차트 데이터 갱신 시작: ${stockCodes.length}개 종목');
+      
+      for (final stockCode in stockCodes) {
+        try {
+          // 차트 데이터 강제 갱신
+          await RemoteKisService.instance.ensureChartAndAnalyze(
+            uid: FirebaseAuth.instance.currentUser?.uid ?? 'debug-user',
+            symbol: stockCode,
+          );
+          
+          print('✅ [분석탭] 차트 데이터 갱신 완료: $stockCode');
+          
+          // 각 요청 사이에 지연으로 트랜잭션 과부하 방지
+          await Future.delayed(const Duration(milliseconds: 100));
+        } catch (e) {
+          print('❌ [분석탭] 차트 데이터 갱신 실패: $stockCode - $e');
+        }
+      }
+      
+      print('✅ [분석탭] 강제 차트 데이터 갱신 완료');
+    } catch (e) {
+      print('❌ [분석탭] 강제 차트 데이터 갱신 실패: $e');
+    }
+  }
+
   @override
   void dispose() {
+    _analysisSub?.cancel();
+    _priceEnsureTimer?.cancel();
+    _chartEnsureTimer?.cancel();
     _analysisTimer?.cancel();
     _quickUpdateTimer?.cancel();
     _cleanupTimer?.cancel();
@@ -306,6 +449,129 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
     _holdingsScrollController.dispose();
     _analysisScrollController.dispose();
     super.dispose();
+  }
+
+  Future<Set<String>> _collectTargetSymbols(String uid) async {
+    final Set<String> symbols = {};
+    try {
+      // 관심종목 데이터 로드 및 서버 데이터 최신화
+      final watchlistData = await _unifiedDataManager.loadWatchlistData();
+      for (final it in watchlistData) {
+        final code = it['stock_code'] ?? it['stockCode'];
+        if (code is String && code.isNotEmpty) {
+          symbols.add(code);
+          // 관심종목 데이터 서버 최신화 (백그라운드)
+          _ensureServerDataFresh(code, uid);
+        }
+      }
+      
+      // 보유종목 데이터 로드 및 서버 데이터 최신화
+      final holds = await _unifiedDataManager.loadHoldingsData();
+      for (final it in holds) {
+        final code = it['pdno'] ?? it['stockCode'] ?? it['stock_code'];
+        if (code is String && code.isNotEmpty) {
+          symbols.add(code);
+          // 보유종목 데이터 서버 최신화 (백그라운드)
+          _ensureServerDataFresh(code, uid);
+        }
+      }
+      
+      final current = _focusedStockCode;
+      if (current.isNotEmpty) symbols.add(current);
+    } catch (e) {
+      print('❌ [분석탭] 종목 수집 실패: $e');
+    }
+    return symbols;
+  }
+  
+  /// 서버 데이터 최신화 (백그라운드)
+  Future<void> _ensureServerDataFresh(String code, String uid) async {
+    try {
+      print('🔄 [분석탭] 서버 데이터 최신화 시작: $code');
+      
+      // 1. 차트 데이터 및 분석 데이터 생성
+      await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: code);
+      
+      // 2. 현재가 데이터도 서버에 저장
+      final priceData = await UnifiedStockService.instance.getCurrentPrice(code, uid: uid);
+      if (priceData != null && priceData.isNotEmpty) {
+        print('✅ [분석탭] 서버 데이터 최신화 완료: $code - ${priceData['currentPrice']}');
+      } else {
+        print('❌ [분석탭] 서버 데이터 최신화 실패: $code (데이터 없음)');
+      }
+    } catch (e) {
+      print('❌ [분석탭] 서버 데이터 최신화 실패 ($code): $e');
+    }
+  }
+
+  Future<void> _ensureLatestOnce(String uid) async {
+    try {
+      final codes = await _collectTargetSymbols(uid);
+      print('🔄 [분석탭] 실시간 데이터 업데이트 시작: ${codes.length}개 종목');
+      
+      // 성능 최적화: 순차 처리로 트랜잭션 과부하 해결 (병렬 처리 → 순차 처리)
+      final results = <Map<String, dynamic>?>[];
+      for (final code in codes) {
+        try {
+          print('📊 [분석탭] 현재가 조회: $code');
+          final priceData = await UnifiedStockService.instance.getCurrentPrice(code, uid: uid);
+          if (priceData != null && priceData.isNotEmpty) {
+            print('✅ [분석탭] 현재가 수신: $code - ${priceData['currentPrice']}');
+            results.add({'code': code, 'priceData': priceData});
+          } else {
+            print('❌ [분석탭] 현재가 데이터 없음: $code');
+            results.add(null);
+          }
+        } catch (e) {
+          print('❌ [분석탭] 현재가 조회 실패 ($code): $e');
+          results.add(null);
+        }
+        
+        // 각 요청 사이에 짧은 지연으로 트랜잭션 과부하 방지
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+      
+      // UI 업데이트는 한 번에 처리
+      if (mounted) {
+        setState(() {
+          for (final result in results) {
+            if (result != null) {
+              final code = result['code'] as String;
+              final priceData = result['priceData'] as Map<String, dynamic>;
+              
+              if (_analysisResults.containsKey(code)) {
+                _analysisResults[code]!['currentPriceData'] = priceData;
+                _analysisResults[code]!['lastUpdated'] = DateTime.now().millisecondsSinceEpoch;
+                print('🔄 [분석탭] 실시간 데이터 UI 반영: $code - ${priceData['currentPrice']}');
+              } else {
+                _analysisResults[code] = {
+                  'currentPriceData': priceData,
+                  'lastUpdated': DateTime.now().millisecondsSinceEpoch,
+                };
+                print('🆕 [분석탭] 새 종목 실시간 데이터 추가: $code - ${priceData['currentPrice']}');
+              }
+            }
+          }
+        });
+      }
+      
+      // 차트 분석도 순차 처리 (트랜잭션 과부하 방지)
+      for (final code in codes) {
+        try {
+          print('📈 [분석탭] 차트 분석: $code');
+          await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: code);
+          
+          // 각 요청 사이에 지연으로 트랜잭션 과부하 방지
+          await Future.delayed(const Duration(milliseconds: 200));
+        } catch (e) {
+          print('❌ [분석탭] 차트 분석 실패 ($code): $e');
+        }
+      }
+      
+      print('✅ [분석탭] 실시간 데이터 업데이트 완료');
+    } catch (e) {
+      print('❌ [분석탭] 실시간 데이터 업데이트 실패: $e');
+    }
   }
 
   /// 자동매매 상태 확인 및 업데이트
@@ -364,8 +630,10 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
           // 4. 추천종목 데이터는 탭 변경 시에만 로드 (성능 최적화)
           // await _loadRecommendedStocksData();
           
-          // 6. 초기 분석 수행 (백그라운드)
-          await _performInitialAnalysis();
+    // 6. 서버 전용 모드에서는 로컬 초기 분석 비활성화
+    if (!_SERVER_ONLY_MODE) {
+      await _performInitialAnalysis();
+    }
           
           print('✅ 백그라운드 데이터 초기화 완료');
           print('📊 최종 데이터 상태:');
@@ -714,14 +982,14 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
     try {
       final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
       final results = await AnalysisFunctionsService().analyzeHoldings(uid: uid, days: 100);
-      setState(() {
+            setState(() {
         _holdingsItems = results
             .map((r) => {
                   'stockCode': (r['symbol'] ?? r['id']).toString(),
                   'analysis': r,
                   'comprehensiveScore': r['comprehensiveScore'],
-                })
-            .toList();
+          })
+          .toList();
         _holdingsItems.sort((a, b) {
           final sa = (a['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
           final sb = (b['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
@@ -854,32 +1122,17 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
     
     for (final stockCode in stockCodes) {
       try {
+        print('📊 서버 선분석 보장: $stockCode');
+        final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+        await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
         print('📊 API 데이터 수집: $stockCode');
         
-        // API에서 현재가 데이터 조회 (통일된 API 서비스 사용)
-        Map<String, dynamic>? priceData = await _unifiedApiService.getStockPrice(stockCode);
-        
+        // 서버 현재가 조회 (캐시 우선). 로컬 저장 제거, 화면은 서버값만 사용
+        final priceData = await RemoteKisService.instance.getCurrentPrice(stockCode);
         if (priceData != null && priceData.isNotEmpty) {
-          // 로컬 DB에 저장 (올바른 매개변수 사용)
-          await _realtimeDataRepository.saveRealtimeData(
-            stockCode: stockCode,
-            market: 'UNKNOWN',
-            currentPrice: (priceData['currentPrice'] ?? 0.0).toDouble(),
-            prevClose: (priceData['prevClose'] ?? 0.0).toDouble(),
-            changeAmount: (priceData['change'] ?? 0.0).toDouble(),
-            changeRate: (priceData['changeRate'] ?? 0.0).toDouble(),
-            volume: (priceData['volume'] ?? 0).toInt(),
-            tradeAmount: (priceData['tradeAmount'] ?? 0.0).toDouble(),
-            highPrice: (priceData['high'] ?? priceData['highPrice'] ?? 0.0).toDouble(),
-            lowPrice: (priceData['low'] ?? priceData['lowPrice'] ?? 0.0).toDouble(),
-            openPrice: (priceData['open'] ?? priceData['openPrice'] ?? 0.0).toDouble(),
-            marketCap: priceData['marketCap']?.toDouble(),
-            per: priceData['per']?.toDouble(),
-            pbr: priceData['pbr']?.toDouble(),
-          );
-          print('✅ API 데이터 저장 완료: $stockCode');
+          print('✅ 서버 현재가 수신: $stockCode (${priceData['currentPrice']})');
         } else {
-          print('⚠️ API 데이터 없음: $stockCode');
+          print('⚠️ 서버 현재가 없음: $stockCode');
         }
         
         // 차트 데이터도 조회 (일봉 데이터) - 통일된 API 서비스 사용
@@ -887,24 +1140,8 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
           List<Map<String, dynamic>> chartData = await RemoteKisService.instance.getDailyChart(stockCode, days: 100);
           
           if (chartData.isNotEmpty) {
-            // 로컬 DB에 저장 (upsertDailyBars 사용)
-            final market = _isNasdaqStock(stockCode) ? 'NASDAQ' : 'KOSPI';
-            final bars = chartData.map((e) => {
-              'date': (e['date'] ?? '').toString().replaceAll('-', ''),
-              'open': (e['open'] ?? 0.0).toDouble(),
-              'high': (e['high'] ?? 0.0).toDouble(),
-              'low': (e['low'] ?? 0.0).toDouble(),
-              'close': (e['close'] ?? 0.0).toDouble(),
-              'volume': (e['volume'] ?? 0).toInt(),
-            }).toList();
-
-            await _historicalDataRepository.upsertDailyBars(
-              stockCode: stockCode,
-              market: market,
-              bars: bars,
-              keepDays: 100,
-            );
-            print('✅ 차트 데이터 저장 완료: $stockCode');
+            // 로컬 저장 제거. 서버 캐시에서 직접 사용
+            print('✅ 서버 차트 수신: $stockCode (${chartData.length}일)');
           }
         } catch (e) {
           print('⚠️ 차트 데이터 조회 실패 ($stockCode): $e');
@@ -1038,12 +1275,17 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
     final Map<String, Map<String, dynamic>> existingResults = Map.from(_analysisResults);
     bool hasChanges = false;
     
-    // API에서 최신 데이터 수집 (1분마다)
-    await _refreshLatestDataFromAPI(allStocks);
+      // API에서 최신 데이터 수집 (1분마다) - 강제 갱신
+      await _refreshLatestDataFromAPI(allStocks);
+      
+      // 🔧 강제 차트 데이터 갱신 (캐시 무시)
+      await _forceRefreshChartData(allStocks);
     
     // 모든 종목 분석 (로컬 DB 데이터 우선 사용)
     for (final stockCode in allStocks) {
       try {
+        final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+        await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
         final result = await _performSingleStockAnalysisWithLocalData(stockCode);
         if (result != null) {
           // 변경사항이 있는지 확인 (더 정확한 비교)
@@ -1665,25 +1907,36 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
         // API에서 반환된 데이터가 불변 맵일 수 있으므로 새로운 맵으로 복사
         final Map<String, dynamic> safeRealtimeData = realtimeData;
         
-        // KIS API 서비스에서 공식 필드명 사용
-        final currentPrice = _toDouble(safeRealtimeData['prpr']);
-        final prevClose = _toDouble(safeRealtimeData['stck_prdy_clpr']);
-        final volume = _toInt(safeRealtimeData['acml_vol']);
-        final highPrice = _toDouble(safeRealtimeData['high']);
-        final lowPrice = _toDouble(safeRealtimeData['low']);
-        final openPrice = _toDouble(safeRealtimeData['open'] ?? safeRealtimeData['stck_oprc'] ?? 0.0);
-        final changeAmount = _toDouble(safeRealtimeData['diff']);
-        final changeRate = _toDouble(safeRealtimeData['rate']);
-        final tradeAmount = _toDouble(safeRealtimeData['tradeAmount']);
+        // 서버에서 받은 데이터 필드명 매핑 (RemoteKisService 응답 형식)
+        final currentPrice = _toDouble(safeRealtimeData['current_price'] ?? safeRealtimeData['currentPrice'] ?? safeRealtimeData['prpr']);
+        final prevClose = _toDouble(safeRealtimeData['prev_close'] ?? safeRealtimeData['prevClose'] ?? safeRealtimeData['stck_prdy_clpr']);
+        // 거래량 우선순위: tvol (총 거래량) > 차트 데이터 > acml_vol (누적 거래량)
+        final tvol = _toInt(safeRealtimeData['tvol']);
+        final chartVolume = await _getLatestVolumeFromChart(stockCode);
+        final acmlVol = _toInt(safeRealtimeData['acml_vol']);
+        
+        // tvol이 있으면 우선 사용, 없으면 차트 데이터, 마지막으로 acml_vol
+        final volume = tvol > 0 ? tvol : (chartVolume > 0 ? chartVolume.toInt() : acmlVol);
+        
+        print('🔍 [분석탭] 거래량 데이터: tvol=$tvol, 차트=$chartVolume, acml_vol=$acmlVol, 최종=$volume');
+        final highPrice = _toDouble(safeRealtimeData['high_price'] ?? safeRealtimeData['highPrice'] ?? safeRealtimeData['high']);
+        final lowPrice = _toDouble(safeRealtimeData['low_price'] ?? safeRealtimeData['lowPrice'] ?? safeRealtimeData['low']);
+        final openPrice = _toDouble(safeRealtimeData['open_price'] ?? safeRealtimeData['openPrice'] ?? safeRealtimeData['open'] ?? safeRealtimeData['stck_oprc'] ?? 0.0);
+        final changeAmount = _toDouble(safeRealtimeData['change_amount'] ?? safeRealtimeData['changeAmount'] ?? safeRealtimeData['diff']);
+        final changeRate = _toDouble(safeRealtimeData['change_rate'] ?? safeRealtimeData['changeRate'] ?? safeRealtimeData['rate']);
+        final tradeAmount = _toDouble(safeRealtimeData['trade_amount'] ?? safeRealtimeData['tradeAmount']);
         
         print('🔍 [AnalysisScreen] 파싱된 데이터: currentPrice=$currentPrice, prevClose=$prevClose, volume=$volume');
         print('🔍 [AnalysisScreen] 원본 API 데이터 상세:');
-        print('  - prpr: ${safeRealtimeData['prpr']}');
-        print('  - stck_prdy_clpr: ${safeRealtimeData['stck_prdy_clpr']}');
-        print('  - high: ${safeRealtimeData['high']}');
-        print('  - low: ${safeRealtimeData['low']}');
-        print('  - open: ${safeRealtimeData['open']}');
-        print('  - stck_oprc: ${safeRealtimeData['stck_oprc']}');
+        print('  - currentPrice: ${safeRealtimeData['currentPrice']}');
+        print('  - prevClose: ${safeRealtimeData['prevClose']}');
+        print('  - highPrice: ${safeRealtimeData['highPrice']}');
+        print('  - lowPrice: ${safeRealtimeData['lowPrice']}');
+        print('  - openPrice: ${safeRealtimeData['openPrice']}');
+        print('  - volume: ${safeRealtimeData['volume']}');
+        print('  - changeAmount: ${safeRealtimeData['changeAmount']}');
+        print('  - changeRate: ${safeRealtimeData['changeRate']}');
+        print('  - 최종 currentPrice: $currentPrice');
         print('  - 최종 openPrice: $openPrice');
         
         // 매핑된 데이터로 새로운 맵 생성
@@ -2072,7 +2325,45 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
         actions: [
           // 새로고침 아이콘 (모든 탭에서 사용 가능)
           IconButton(
-            onPressed: _refreshAnalysisData,
+            onPressed: () async {
+              try {
+                print('🔄 [분석탭] 수동 새로고침 시작');
+                final uid = FirebaseAuth.instance.currentUser?.uid;
+                if (uid != null) {
+                  // 시장 상태와 무관하게 강제 최신화
+                  await _ensureLatestOnce(uid);
+                  
+                  // 추가: 실시간 데이터 강제 업데이트 및 UI 반영
+                  final codes = await _collectTargetSymbols(uid);
+                  for (final code in codes) {
+                    print('🔄 [분석탭] 강제 현재가 업데이트: $code');
+                    final priceData = await UnifiedStockService.instance.getCurrentPrice(code, uid: uid);
+                    if (priceData != null && priceData.isNotEmpty && mounted) {
+                      // 실시간 데이터를 UI에 즉시 반영
+                      setState(() {
+                        if (_analysisResults.containsKey(code)) {
+                          _analysisResults[code]!['currentPriceData'] = priceData;
+                          _analysisResults[code]!['lastUpdated'] = DateTime.now().millisecondsSinceEpoch;
+                        }
+                      });
+                      print('✅ [분석탭] 강제 UI 반영: $code - ${priceData['currentPrice']}');
+                    }
+                  }
+                }
+                await _refreshAnalysisData();
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('✅ 최신 데이터로 업데이트 완료'), duration: Duration(seconds: 2)),
+                  );
+                }
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('최신화 실패: $e'), duration: const Duration(seconds: 3), backgroundColor: Colors.red),
+                  );
+                }
+              }
+            },
             icon: const Icon(Icons.refresh, color: Colors.white),
             tooltip: '분석 데이터 새로고침',
           ),
@@ -2242,11 +2533,7 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
       holdingsItems: _holdingsItems,
       onApiReconnect: () async {
                   try {
-                    await KisUnifiedApiService().initialize(
-            appKey: ApiConfig.instance.appKey!,
-            appSecret: ApiConfig.instance.appSecret!,
-            accountNumber: ApiConfig.instance.accountNo!,
-          );
+                    await KisUnifiedApiService().initialize();
                     await _loadHoldings();
                   } catch (e) {
                     print('❌ API 재인증 실패: $e');
@@ -2342,9 +2629,21 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
   ) {
     final stockCode = item['stock_code'] as String? ?? item['stockCode'] as String? ?? '';
     
+    // 실시간 데이터 우선 사용: item.currentPriceData → analysisData.currentPriceData → currentPriceData
+    final Map<String, dynamic>? realtimePriceData = 
+      (item['currentPriceData'] as Map<String, dynamic>?) ??
+      (analysisData?['currentPriceData'] as Map<String, dynamic>?) ??
+      currentPriceData;
+    
+    print('🔍 [분석탭] _buildAnalysisCard: $stockCode');
+    print('  - item.currentPriceData: ${item['currentPriceData']}');
+    print('  - analysisData.currentPriceData: ${analysisData?['currentPriceData']}');
+    print('  - currentPriceData: $currentPriceData');
+    print('  - 최종 realtimePriceData: $realtimePriceData');
+    
     return AnalysisCard(
       item: Map<String, dynamic>.from(item as Map),
-      currentPriceData: currentPriceData,
+      currentPriceData: realtimePriceData,
       analysisData: analysisData,
       isSelected: isSelected,
       isSelectionMode: _isSelectionMode && _tabController.index != 1, // 보유종목 탭이 아닐 때만
@@ -2398,58 +2697,9 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
   }
   
 
-  /// 나스닥 종목인지 확인 (실제 데이터베이스 market 필드 사용)
+  /// 나스닥 종목인지 확인 (통합 서비스 사용)
   bool _isNasdaqStock(String stockCode) {
-    // 관심종목에서 해당 종목의 market 정보 확인
-    final watchlistItem = _watchlistItems.firstWhere(
-      (item) => item['stock_code'] == stockCode,
-      orElse: () => <String, dynamic>{},
-    );
-    
-    // 보유종목에서 해당 종목의 market 정보 확인
-    final holdingItem = _holdingsItems.firstWhere(
-      (item) => item['stockCode'] == stockCode,
-      orElse: () => <String, dynamic>{},
-    );
-    
-    // market이 'NASDAQ'이면 나스닥 종목
-    final dynamic marketRaw = watchlistItem['market'] ?? holdingItem['market'];
-    final String? market = marketRaw is String ? marketRaw : null;
-
-    // AppDataManager에서 보조 정보 확인
-    String? marketFromInfo;
-    try {
-      final info = AppDataManager.instance.getStockInfo(stockCode);
-      final dynamic m = info?['market'];
-      marketFromInfo = m is String ? m : null;
-    } catch (_) {}
-
-    final String marketUpper = (market ?? marketFromInfo ?? '').toUpperCase();
-    final String code = stockCode.trim().toUpperCase();
-
-    // 미국 시장 코드 전반을 달러 표기로 처리 (NASDAQ, NASD, NYSE, AMEX 등)
-    final bool isUsMarket = marketUpper == 'NASDAQ' ||
-        marketUpper == 'NASD' ||
-        marketUpper == 'NYSE' ||
-        marketUpper == 'AMEX' ||
-        marketUpper == 'US' ||
-        marketUpper == 'USA';
-
-    // 패턴 기반 휴리스틱
-    // - 전부 대문자 알파벳/점(.) 1~10자리 → 미국 티커로 간주 (예: BRK.B)
-    // - 하나라도 알파벳이 포함되고 전체가 숫자만은 아님 → 미국 티커로 간주
-    final bool isLikelyUsTicker =
-        RegExp(r'^[A-Z\.]{1,10}$').hasMatch(code) ||
-        (RegExp(r'[A-Z]').hasMatch(code) && !RegExp(r'^\d+$').hasMatch(code));
-
-    final bool isNasdaq = isUsMarket || isLikelyUsTicker;
-
-    // 디버그 로그 (필요시에만 출력)
-    if (code.startsWith('A') || code.startsWith('Q') || code.startsWith('T') || code.startsWith('N')) {
-      print('🔍 나스닥/미국 종목 확인: $code -> market=$marketUpper, isUsMarket=$isUsMarket, heuristic=$isLikelyUsTicker, result=$isNasdaq');
-    }
-    
-    return isNasdaq;
+    return StockUtils.instance.isOverseasStock(stockCode);
   }
   /// 모든 보유종목 데이터 강제 갱신
   Future<void> _forceRefreshAllHoldingsData() async {
@@ -2537,8 +2787,10 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
   }
   /// 지표별 상세한 이유 생성 (한글)
   String _generateDetailedReason(String indicatorName, double score, String signal, Map<String, dynamic> analysis) {
-    // 상세 분석 결과가 있으면 사용
-    final detailedAnalysis = analysis['detailedAnalysis'] as Map<String, dynamic>? ?? {};
+    // 상세 분석 결과가 있으면 사용 (동적 맵 안전 변환)
+    final dynamic detailedRaw = analysis['detailedAnalysis'];
+    final Map<String, dynamic> detailedAnalysis =
+        detailedRaw is Map ? detailedRaw.map((k, v) => MapEntry(k.toString(), v)) : <String, dynamic>{};
     
     // 지표명 매핑
     final indicatorKey = _getIndicatorKey(indicatorName);
@@ -2551,7 +2803,10 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
     // 상세 분석이 없으면 기존 로직 사용
     final currentPrice = (analysis['currentPrice'] as num?)?.toDouble() ?? 0.0;
     final prevClose = (analysis['prevClose'] as num?)?.toDouble() ?? currentPrice;
-    final technicalData = analysis['technicalData'] as Map<String, dynamic>? ?? {};
+    // 기술 데이터 동적 맵 안전 변환
+    final dynamic technicalRaw = analysis['technicalData'];
+    final Map<String, dynamic> technicalData =
+        technicalRaw is Map ? technicalRaw.map((k, v) => MapEntry(k.toString(), v)) : <String, dynamic>{};
     
     // 가격 변화율 계산
     final priceChangePercent = prevClose > 0 ? ((currentPrice - prevClose) / prevClose) * 100 : 0.0;
@@ -3008,7 +3263,8 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
           }
         } else {
           // 국내 종목인 경우 원화 잔고 확인 (통일된 API 서비스 사용)
-          final balanceResp = await _unifiedApiService.getAccountBalanceCompat();
+          // 서버 전환: 계좌 조회 비활성화
+          final balanceResp = null;
           final accountInfo = balanceResp?['domestic']?['accountInfo'] as List?;
           final availableBalance = accountInfo?.isNotEmpty == true 
             ? (accountInfo!.first as Map<String, dynamic>)['ord_able_amt'] ?? 0.0
@@ -3393,9 +3649,12 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
   }
   /// 지표별 점수 반환 (ComprehensiveIndicatorCalculator에서 계산된 개별 점수 사용)
   double _getIndicatorScore(String indicatorName, Map<String, dynamic> analysis) {
-    // ComprehensiveIndicatorCalculator에서 계산된 individualScores 사용 (가중치 적용 전 원래 점수)
-    final contributions = analysis['contributions'] as Map<String, double>? ?? {};
-    final individualScores = analysis['individualScores'] as Map<String, double>? ?? {};
+    // 서버에서 동적 맵이 들어오므로 안전 변환
+    final Map<String, dynamic> contributionsRaw = Map<String, dynamic>.from((analysis['contributions'] as Map?) ?? const {});
+    final Map<String, dynamic> individualRaw = Map<String, dynamic>.from((analysis['individualScores'] as Map?) ?? const {});
+    final Map<String, dynamic> analysisBreakdown = Map<String, dynamic>.from((analysis['analysis'] as Map?) ?? const {});
+    final Map<String, double> contributions = contributionsRaw.map((k, v) => MapEntry(k.toString(), (v as num?)?.toDouble() ?? 0.0));
+    final Map<String, double> individualScores = individualRaw.map((k, v) => MapEntry(k.toString(), (v as num?)?.toDouble() ?? 0.0));
     
     // 지표명 매핑 (한글명 → 영문 키)
     final Map<String, String> indicatorMapping = {
@@ -3416,8 +3675,29 @@ class _AnalysisScreenState extends State<AnalysisScreen> with TickerProviderStat
       mappedName = indicatorName;
     }
     
-    final contribution = contributions[mappedName] ?? 0.0;
-    final individualScore = individualScores[mappedName] ?? 0.0;
+    // 기본 가중치(서버 계산기와 동일)
+    const Map<String, double> defaultWeights = {
+      'volume': 0.20,
+      'rsi': 0.20,
+      'macd': 0.20,
+      'bollinger': 0.15,
+      'movingAverage': 0.15,
+      'vwap': 0.05,
+      'adx': 0.05,
+    };
+
+    final double individualScore = individualScores[mappedName]
+        ?? ((analysisBreakdown[mappedName] is Map)
+            ? (((analysisBreakdown[mappedName]['score']) as num?)?.toDouble() ?? 0.0)
+            : 0.0);
+
+    double contribution = contributions[mappedName] ?? 0.0;
+    if (contribution == 0.0) {
+      final double weight = ((analysisBreakdown[mappedName] is Map)
+              ? (((analysisBreakdown[mappedName]['weight']) as num?)?.toDouble())
+              : null) ?? (defaultWeights[mappedName] ?? 0.0);
+      contribution = individualScore * weight;
+    }
     
     print('🔍 지표점수 디버깅:');
     print('  - 지표명: $indicatorName');

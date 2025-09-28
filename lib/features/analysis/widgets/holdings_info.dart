@@ -23,6 +23,11 @@ class HoldingsInfo extends StatelessWidget {
     final avgPrice = (holding['avgPrice'] ?? holding['avg_price'] ?? holding['avgPrice'] ?? 0.0).toDouble();
     final stockCode = holding['stockCode'] as String? ?? holding['stock_code'] as String? ?? '';
 
+    // 보유수량이 0이면 보유정보 표시하지 않음
+    if (quantity <= 0) {
+      return const SizedBox.shrink();
+    }
+
     final currentPrices = getCurrentPrices();
     final currentPriceData = currentPrices[stockCode];
 

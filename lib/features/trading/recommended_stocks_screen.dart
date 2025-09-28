@@ -1952,20 +1952,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
                     final score = (analysisResult['comprehensiveScore'] as num?)?.toDouble() ?? 0.0;
                     final double priceForCache = (analysisResult['currentPrice'] as num?)?.toDouble() ?? currentPrice;
 
-                    // 4) SQL 우선 저장 + 캐시 보조 (소스 오브 트루스: SQL)
-                    try {
-                      final topRepo = TopStocksRepository();
-                      await topRepo.saveTopStock(
-                        stockCode: stock.stockCode,
-                        stockName: stock.stockName,
-                        market: stock.market,
-                        score: score,
-                        currentPrice: priceForCache,
-                        rank: 0,
-                      );
-                    } catch (e) {
-                      print('로컬DB 점수 반영 실패: $e');
-                    }
+                    // 4) 서버가 점수/TopN 저장을 담당. 클라이언트 저장은 수행하지 않음.
                     await RecommendedStocksData().updateStockScore(stock.stockCode, score, metadata: {
                       'price': priceForCache,
                       'market': stock.market,
@@ -1973,9 +1960,10 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
                     });
                     // 5) SQL에서 재조회 후 UI 갱신(레이스 제거)
                     try {
-                      final reloaded = await TopStocksRepository().getStockScore(stock.stockCode);
-                      final double uiScore = (reloaded?['score'] as num?)?.toDouble() ?? score;
-                      final double uiPrice = (reloaded?['currentPrice'] as num?)?.toDouble() ?? priceForCache;
+                      // 서버 전환: 로컬 top_stocks 재조회 제거
+                      final reloaded = null;
+                      final double uiScore = score;
+                      final double uiPrice = priceForCache;
                       if (mounted) setState(() {
                         for (final entry in _marketTopStocks.entries) {
                           final idx = entry.value.indexWhere((e) => e.stockCode == stock.stockCode);

@@ -43,9 +43,21 @@ service cloud.firestore {
       allow write: if false;
     }
     match /prices/{doc} {
- 		  allow read: if true;
-  		allow write: if request.auth != null;
+		  allow read: if true;
+		allow write: if request.auth != null;
 		}
+    
+    // 종목별 차트 데이터 (stocks/{symbol}/chart)
+    match /stocks/{symbol}/chart/{doc} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+    
+    // 종목별 분석 데이터 (stocks/{symbol}/analysis)
+    match /stocks/{symbol}/analysis/{doc} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
 	function isServer() {
   // Firebase Admin SDK(서비스 계정)로 서명된 요청만 허용
   return request.auth != null && request.auth.token.firebase.sign_in_provider == 'custom';

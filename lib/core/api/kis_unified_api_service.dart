@@ -12,9 +12,14 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/api_config.dart';
 import '../data/stock_master_parser.dart';
+import 'global_api_credentials.dart';
+import '../remote/remote_kis_service.dart';
 
 // 확장 기능 import
 import 'kis_unified_api_service_account.dart';
@@ -91,15 +96,25 @@ class KisUnifiedApiService {
   String _chartKey(String stockCode, String periodCode, int count) => 'chart:$stockCode:$periodCode:$count';
   bool _isFresh(DateTime? ts) => ts != null && DateTime.now().difference(ts) < _chartTtl;
 
-  /// 초기화
+  /// 초기화 (GlobalApiCredentials 사용)
   Future<void> initialize({
-    required String appKey,
-    required String appSecret,
-    required String accountNumber,
+    String? appKey,
+    String? appSecret,
+    String? accountNumber,
   }) async {
-    _appKey = appKey;
-    _appSecret = appSecret;
-    _accountNumber = accountNumber;
+    // GlobalApiCredentials에서 자격증명 가져오기
+    if (GlobalApiCredentials.instance.isInitialized && GlobalApiCredentials.instance.hasAllCredentials) {
+      _appKey = GlobalApiCredentials.instance.appKey;
+      _appSecret = GlobalApiCredentials.instance.appSecret;
+      _accountNumber = GlobalApiCredentials.instance.accountNo;
+      print('✅ [KisUnifiedApiService] GlobalApiCredentials에서 자격증명 로드');
+    } else {
+      // 폴백: 파라미터에서 가져오기
+      _appKey = appKey;
+      _appSecret = appSecret;
+      _accountNumber = accountNumber;
+      print('⚠️ [KisUnifiedApiService] GlobalApiCredentials 미사용, 파라미터 사용');
+    }
 
     _dio = Dio(BaseOptions(
       baseUrl: 'https://openapi.koreainvestment.com:9443',
@@ -334,75 +349,7 @@ class KisUnifiedApiService {
           if (output != null) {
             print('✅ [통일API] 국내주식 현재가 조회 성공: $stockCode');
             final parsed = _parseDomesticStockPriceResponse(output);
-            // Firestore prices 업서트(denormalize)
-            try {
-              final nowMs = DateTime.now().millisecondsSinceEpoch;
-              final market = MarketTimeValidator.instance.getMarketFromSymbol(stockCode);
-              final stockName = (parsed['stockName'] ?? '').toString().trim().isNotEmpty
-                  ? (parsed['stockName'] ?? '').toString()
-                  : (StockMasterParser().getStockInfo(stockCode)?['name']?.toString() ?? '');
-              // 보정 계산
-              final pr = parsed['prpr'] as num?;
-              final pc = parsed['stck_prdy_clpr'] as num?;
-              num? diff = parsed['diff'] as num?;
-              num? rate = parsed['rate'] as num?;
-              if ((diff == null || diff == 0) && pr != null && pc != null) {
-                diff = pr - pc;
-              }
-              if ((rate == null || rate == 0) && pr != null && pc != null && pc != 0) {
-                rate = ((pr - pc) / pc) * 100;
-              }
-              // TODO(server-migration): kClientWritesEnabled=false 시 서버로 이전
-              await FirebaseFirestore.instance.collection('prices').doc(stockCode).set({
-                'stock_name': stockName,
-                'market': market,
-                'current_price': pr ?? 0,
-                'prev_close': pc ?? 0,
-                'change_amount': diff ?? 0,
-                'change_rate': rate ?? 0,
-                'volume': parsed['acml_vol'] ?? 0,
-                'trade_amount': 0,
-                'high_price': parsed['high'] ?? 0,
-                'low_price': parsed['low'] ?? 0,
-                'open_price': parsed['open'] ?? 0,
-                'market_cap': null,
-                'per': null,
-                'pbr': null,
-                'timestamp': nowMs,
-              }, SetOptions(merge: true));
-
-              // Fallback: 값이 비어 있으면 일봉 2개로 보정 (현재/전일 종가, 거래량)
-              final needFallback = (pr == null || pr == 0) || (pc == null || pc == 0) || (parsed['acml_vol'] == null || parsed['acml_vol'] == 0);
-              if (needFallback) {
-                try {
-                  final raw = await getDomesticDailyChart(stockCode: stockCode, count: 2);
-                  if (raw.isNotEmpty) {
-                    final last = raw.first;
-                    final prev = raw.length > 1 ? raw[1] : null;
-                    final closeNow = parseDouble(last['stck_clpr']);
-                    final volNow = parseInt(last['acml_vol']);
-                    final prevClose = prev != null ? parseDouble(prev['stck_clpr']) : null;
-                    double? diff2;
-                    double? rate2;
-                    if (closeNow != null && prevClose != null) {
-                      diff2 = closeNow - prevClose;
-                      if (prevClose != 0) rate2 = (diff2 / prevClose) * 100;
-                    }
-                    await FirebaseFirestore.instance.collection('prices').doc(stockCode).set({
-                      'current_price': closeNow ?? pr ?? 0,
-                      'prev_close': prevClose ?? pc ?? 0,
-                      'volume': volNow ?? parsed['acml_vol'] ?? 0,
-                      'change_amount': diff2 ?? (pr != null && pc != null ? (pr - pc) : 0),
-                      'change_rate': rate2 ?? ((pr != null && pc != null && pc != 0) ? ((pr - pc) / pc) * 100 : 0),
-                    }, SetOptions(merge: true));
-                  }
-                } catch (e) {
-                  print('⚠️ domestic chart fallback 실패: $e');
-                }
-              }
-            } catch (e) {
-              print('⚠️ Firestore prices 업서트 실패(domestic): $e');
-            }
+            // 클라이언트 Firestore 쓰기 금지: 서버 전용으로 이전됨
             return parsed;
           }
         }
@@ -467,6 +414,7 @@ class KisUnifiedApiService {
   /// 2. 해외주식 현재가 API (공식 가이드라인)
   /// ========================================
   
+
   /// 해외주식 현재가 조회 (1호가)
   /// 
   /// 공식 가이드라인:
@@ -488,11 +436,24 @@ class KisUnifiedApiService {
           'EXCD': exchangeCode,
           'SYMB': symbol,
         },
-        trId: 'HHDFS76200100',
+        trId: 'HHDFS76200100', // 해외주식 현재가 1호가
       );
 
       print('🔍 [API] 응답 상태: ${response.statusCode}');
       print('🔍 [API] 응답 데이터: ${response.data}');
+      
+      if (response.statusCode == 200) {
+        print('🔍 [API] HTTP 200 응답 확인');
+        if (response.data['rt_cd'] == '0') {
+          print('✅ [API] KIS API 성공 응답');
+        } else {
+          print('❌ [API] KIS API 오류: ${response.data['rt_cd']} - ${response.data['msg1']}');
+          return null;
+        }
+      } else {
+        print('❌ [API] HTTP 오류: ${response.statusCode}');
+        return null;
+      }
       
       if (response.statusCode == 200 && response.data['rt_cd'] == '0') {
         final output1 = response.data['output1'];
@@ -501,7 +462,7 @@ class KisUnifiedApiService {
           print('🔍 [API] output1 데이터: $output1');
           
           // 1차: 1호가 응답 파싱
-          final parsed = _parseOverseasStockPriceResponse(output1);
+          final parsed = await _parseOverseasStockPriceResponse(output1, exchangeCode);
           print('🔍 [API] 파싱된 데이터: $parsed');
 
           // Firestore prices 업서트(denormalize)
@@ -525,24 +486,9 @@ class KisUnifiedApiService {
             }
             if (name.isEmpty) name = symbol; // 최후 폴백
 
-            // TODO(server-migration): kClientWritesEnabled=false 시 서버로 이전
-            await FirebaseFirestore.instance.collection('prices').doc(symbol).set({
-              'stock_name': name,
-              'market': market,
-              'current_price': parsed['last'] ?? parsed['prpr'] ?? 0,
-              'prev_close': parsed['prevClose'] ?? 0,
-              'change_amount': parsed['change'] ?? 0,
-              'change_rate': parsed['changeRate'] ?? 0,
-              'volume': parsed['volume'] ?? 0,
-              'trade_amount': parsed['totalValue'] ?? 0,
-              'high_price': parsed['high'] ?? 0,
-              'low_price': parsed['low'] ?? 0,
-              'open_price': parsed['open'] ?? 0,
-              'market_cap': parsed['marketCap'],
-              'per': parsed['pe'],
-              'pbr': parsed['pb'],
-              'timestamp': nowMs,
-            }, SetOptions(merge: true));
+            // Firestore 직접 쓰기 비활성화 - 서버 Functions를 통해서만 데이터 저장
+            print('📊 $symbol: 현재가 데이터는 서버 Functions를 통해 저장됩니다');
+            print('⚠️ 클라이언트에서 Firestore 직접 쓰기 비활성화됨 (권한 문제 방지)');
           } catch (e) {
             print('⚠️ Firestore prices 업서트 실패(overseas): $e');
           }
@@ -582,16 +528,8 @@ class KisUnifiedApiService {
                   if ((changeRt2 == null || changeRt2 == 0) && lastNow != null && prevClose2 != null && prevClose2 != 0) {
                     changeRt2 = ((lastNow - prevClose2) / prevClose2) * 100;
                   }
-                  await FirebaseFirestore.instance.collection('prices').doc(symbol).set({
-                    'open_price': open ?? 0,
-                    'high_price': high ?? 0,
-                    'low_price': low ?? 0,
-                    'prev_close': prevClose2 ?? FieldValue.delete(),
-                    'volume': volume2 ?? FieldValue.delete(),
-                    'trade_amount': totalValue2 ?? FieldValue.delete(),
-                    'change_amount': changeAmt2 ?? FieldValue.delete(),
-                    'change_rate': changeRt2 ?? FieldValue.delete(),
-                  }, SetOptions(merge: true));
+                  // Firestore 직접 쓰기 비활성화 - 서버 Functions를 통해서만 데이터 저장
+                  print('📊 $symbol: 보조 현재가 데이터는 서버 Functions를 통해 저장됩니다');
                 }
               }
             } catch (_) {}
@@ -638,50 +576,145 @@ class KisUnifiedApiService {
     }
   }
 
-  /// 해외주식 현재가 응답 파싱 (원본 필드명 사용)
-  Map<String, dynamic> _parseOverseasStockPriceResponse(Map<String, dynamic> output) {
-    // 현재가 우선순위: last -> ovrs_nmix_prpr -> ovrs_prod_prpr -> prpr
-    final currentPrice = parseDouble(output['last'] ?? 
-                                   output['ovrs_nmix_prpr'] ?? 
-                                   output['ovrs_prod_prpr'] ?? 
-                                   output['prpr']);
-    
-    // 전일가 우선순위: base -> ovrs_nmix_clpr -> ovrs_prod_clpr -> stck_prdy_clpr
-    final prevClose = parseDouble(output['base'] ?? 
-                                output['ovrs_nmix_clpr'] ?? 
-                                output['ovrs_prod_clpr'] ?? 
-                                output['stck_prdy_clpr']);
+  /// 해외주식 현재가 응답 파싱 (기존 성공하는 API 구조 참고)
+  Future<Map<String, dynamic>> _parseOverseasStockPriceResponse(Map<String, dynamic> output, String exchangeCode) async {
+    // 기존 성공하는 API 구조 참고: output 필드에서 직접 추출
+    final currentPrice = parseDouble(output['last'] ?? output['prpr'] ?? 0);
+    final openPrice = parseDouble(output['open'] ?? 0);
+    final highPrice = parseDouble(output['high'] ?? 0);
+    final lowPrice = parseDouble(output['low'] ?? 0);
+    final prevClose = parseDouble(output['base'] ?? output['stck_prdy_clpr'] ?? 0);
     
     // 등락과 등락률 계산
     final diff = currentPrice - prevClose;
     final rate = prevClose > 0 ? ((diff / prevClose) * 100) : 0.0;
     
-    // 디버깅: NVDL 거래량 특별 로깅 (모든 해외주식에 대해 로깅)
-    final symbol = output['symb'] ?? '';
-    print('🔍 [해외주식 디버깅] API 응답 원본:');
+    // 디버깅: 해외주식 필드 매핑 로깅
+    final symbol = output['code'] ?? output['symb'] ?? '';
+    print('🔍 [해외주식 필드 매핑] API 응답 원본:');
     print('  - symbol: $symbol');
+    
+    // NVD 특별 로깅
+    if (symbol.toUpperCase() == 'NVD') {
+      print('🔍 [NVD 현재가 API 응답] 상세 분석:');
+      print('  - output keys: ${output.keys.toList()}');
+      print('  - output values: $output');
+      print('  - 거래량 관련 필드들:');
+      print('    - tvol: ${output['tvol']}');
+      print('    - pvol: ${output['pvol']}');
+      print('    - acml_vol: ${output['acml_vol']}');
+      print('    - volume: ${output['volume']}');
+      print('    - bvol: ${output['bvol']}');
+      print('    - avol: ${output['avol']}');
+      print('    - bdvl: ${output['bdvl']}');
+      print('    - advl: ${output['advl']}');
+    }
+    
+    // PLTZ 특별 로깅
+    if (symbol.toUpperCase() == 'PLTZ') {
+      print('🔍 [PLTZ 현재가 API 응답] 상세 분석:');
+      print('  - output keys: ${output.keys.toList()}');
+      print('  - output values: $output');
+      print('  - 거래량 관련 필드들:');
+      print('    - tvol: ${output['tvol']}');
+      print('    - pvol: ${output['pvol']}');
+      print('    - acml_vol: ${output['acml_vol']}');
+      print('    - volume: ${output['volume']}');
+      print('    - bvol: ${output['bvol']}');
+      print('    - avol: ${output['avol']}');
+      print('    - bdvl: ${output['bdvl']}');
+      print('    - advl: ${output['advl']}');
+    }
+    
+    // 거래량: inquire-asking-price API 특성 반영
+    // 해외주식 API는 실시간 거래량을 제공하지 않음 (정규장 시간 외)
+    // API 응답에서 사용 가능한 거래량 필드들 확인
+    int volume = parseInt(output['tvol'] ?? output['pvol'] ?? output['acml_vol'] ?? output['volume'] ?? output['bvol'] ?? output['avol'] ?? output['bdvl'] ?? output['advl'] ?? 0);
+    
+    // 해외주식 거래량이 0이면 전일거래량 사용 (마지막 거래량 표시)
+    if (volume == 0) {
+      // 전일거래량이나 마지막 거래량 데이터가 있다면 사용
+      final prevVolume = parseInt(output['pvol'] ?? output['prev_vol'] ?? 0);
+      if (prevVolume > 0) {
+        volume = prevVolume;
+        print('ℹ️ [해외주식] 당일거래량 0 → 전일거래량 사용: $symbol (거래량: $volume)');
+      } else {
+        // 정규장 시간 외에는 거래량 0이 정상
+        print('ℹ️ [해외주식] 거래량 0은 정상 (정규장 시간 외)');
+      }
+    }
+    
+    // 해외주식 공통 처리: 차트 데이터에서 최신 거래량 가져오기 (항상 실행)
+    try {
+      print('🔍 [해외주식] 차트 데이터에서 최신 거래량 조회 시도: $symbol');
+      final chartData = await getOverseasDailyChart(symbol: symbol, exchangeCode: exchangeCode, count: 100);
+      if (chartData.isNotEmpty) {
+        // 차트 데이터에서 최신 데이터(마지막 데이터) 사용
+        final latestChartData = chartData.last;
+        final chartTvol = parseInt(latestChartData['tvol'] ?? 0);
+        final chartVolume = parseInt(latestChartData['volume'] ?? 0);
+        final chartAcmlVol = parseInt(latestChartData['acml_vol'] ?? 0);
+        
+        print('🔍 [해외주식] 차트 데이터 거래량 필드들:');
+        print('  - 차트 데이터 개수: ${chartData.length}');
+        print('  - 최신 데이터: ${latestChartData}');
+        print('  - tvol: $chartTvol');
+        print('  - volume: $chartVolume');
+        print('  - acml_vol: $chartAcmlVol');
+        
+        // tvol이 있으면 우선 사용, 없으면 volume, 마지막으로 acml_vol
+        final latestVolume = chartTvol > 0 ? chartTvol : (chartVolume > 0 ? chartVolume : chartAcmlVol);
+        
+        if (latestVolume > 0) {
+          volume = latestVolume;
+          print('✅ [해외주식] 차트에서 거래량 조회 성공: $symbol (거래량: $volume)');
+        }
+      }
+      
+      // 해외주식 차트 데이터 서버 저장 (RemoteKisService를 통한 호출)
+      if (chartData.isNotEmpty) {
+        print('🔍 [해외주식] 차트 데이터 서버 저장 시도: $symbol');
+        try {
+          // RemoteKisService를 통한 차트 데이터 저장
+          final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+          final success = await RemoteKisService.instance.ensureChartAndAnalyze(
+            uid: uid,
+            symbol: symbol,
+          );
+          if (success) {
+            print('✅ [해외주식] 차트 데이터 서버 저장 성공: $symbol');
+          } else {
+            print('❌ [해외주식] 차트 데이터 서버 저장 실패: $symbol');
+          }
+        } catch (e) {
+          print('❌ [해외주식] 차트 데이터 서버 저장 실패: $symbol - $e');
+          print('ℹ️ [해외주식] 서버 Functions 없음 - 로컬 차트 데이터만 사용');
+        }
+      }
+    } catch (e) {
+      print('⚠️ [해외주식] 차트 거래량 조회 실패: $symbol - $e');
+    }
     print('  - output keys: ${output.keys.toList()}');
-    print('  - tvol: ${output['tvol']}');
+    print('  - last: ${output['last']}');
+    print('  - prpr: ${output['prpr']}');
+    print('  - base: ${output['base']}');
     print('  - acml_vol: ${output['acml_vol']}');
     print('  - volume: ${output['volume']}');
-    print('  - last: ${output['last']}');
-    print('  - ovrs_nmix_prpr: ${output['ovrs_nmix_prpr']}');
-    print('  - ovrs_prod_prpr: ${output['ovrs_prod_prpr']}');
-    print('  - prpr: ${output['prpr']}');
-    print('🔍 [해외주식 디버깅] 파싱 결과:');
+    print('🔍 [해외주식 필드 매핑] 파싱 결과:');
     print('  - 현재가: $currentPrice');
     print('  - 전일가: $prevClose');
-    print('  - 거래량: ${parseInt(output['tvol'] ?? output['acml_vol'])}');
+    print('  - 거래량: $volume');
     print('  - 등락: $diff');
     print('  - 등락률: ${rate.toStringAsFixed(2)}%');
     
     return {
       'prpr': currentPrice, // 현재가
       'stck_prdy_clpr': prevClose, // 전일가
-      'acml_vol': parseInt(output['tvol'] ?? output['acml_vol']), // 거래량
-      'open': parseDouble(output['open'] ?? output['ovrs_nmix_oprc'] ?? output['ovrs_prod_oprc'] ?? 0), // 시가
-      'high': parseDouble(output['high'] ?? output['ovrs_nmix_hgpr'] ?? output['ovrs_prod_hgpr'] ?? 0), // 고가
-      'low': parseDouble(output['low'] ?? output['ovrs_nmix_lwpr'] ?? output['ovrs_prod_lwpr'] ?? 0), // 저가
+      'acml_vol': volume, // 거래량 (기존 성공하는 API 구조 참고)
+      'tvol': parseInt(output['tvol'] ?? 0), // 총 거래량 (우선 사용)
+      'open': openPrice, // 시가
+      'high': highPrice, // 고가
+      'low': lowPrice, // 저가
       'diff': diff, // 전일대비 (계산)
       'rate': rate, // 등락률 (계산)
       'tradeAmount': parseDouble(output['tamt'] ?? output['tradeAmount']), // 거래대금
@@ -711,18 +744,31 @@ class KisUnifiedApiService {
     try {
       print('📈 [통일API] 국내주식 일별 차트 조회: $stockCode (기간: $periodCode, 개수: $count)');
       
-      // 날짜 설정 (오늘 기준)
+      // 날짜 설정 개선 - 거래일 기준으로 조정
       final now = DateTime.now();
-      final endDate = '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}';
-      final startDate = now.subtract(Duration(days: count)).toString().replaceAll('-', '').substring(0, 8);
+      
+      // 주말인 경우 금요일로 조정
+      DateTime endDate;
+      if (now.weekday == DateTime.saturday) {
+        endDate = now.subtract(const Duration(days: 1)); // 금요일
+      } else if (now.weekday == DateTime.sunday) {
+        endDate = now.subtract(const Duration(days: 2)); // 금요일
+      } else {
+        endDate = now;
+      }
+      
+      final endDateStr = '${endDate.year}${endDate.month.toString().padLeft(2, '0')}${endDate.day.toString().padLeft(2, '0')}';
+      final startDateStr = endDate.subtract(Duration(days: count + 10)).toString().replaceAll('-', '').substring(0, 8); // 버퍼 추가
+      
+      print('📅 [API] 날짜 범위: $startDateStr ~ $endDateStr (요청: $count일)');
       
       final response = await authedGet(
         '/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice',
         {
           'FID_COND_MRKT_DIV_CODE': marketCode,
           'FID_INPUT_ISCD': stockCode,
-          'FID_INPUT_DATE_1': startDate,
-          'FID_INPUT_DATE_2': endDate,
+          'FID_INPUT_DATE_1': startDateStr,
+          'FID_INPUT_DATE_2': endDateStr,
           'FID_PERIOD_DIV_CODE': periodCode,
           'FID_ORG_ADJ_PRC': adjustedPrice,
         },
@@ -893,6 +939,36 @@ class KisUnifiedApiService {
             print('🔍 첫 번째 아이템 키들: ${output.first.keys.toList()}');
             print('🔍 첫 번째 아이템 값들: ${output.first}');
             
+            // NVD 특별 로깅
+            if (symbol.toUpperCase() == 'NVD') {
+              print('🔍 [NVD 차트 API 응답] 상세 분석:');
+              for (int i = 0; i < output.length && i < 3; i++) {
+                final item = output[i];
+                print('  - Item $i:');
+                print('    - date: ${item['xymd']}');
+                print('    - close: ${item['clos']}');
+                print('    - tvol: ${item['tvol']}');
+                print('    - volume: ${item['volume']}');
+                print('    - acml_vol: ${item['acml_vol']}');
+                print('    - all keys: ${item.keys.toList()}');
+              }
+            }
+            
+            // PLTZ 특별 로깅
+            if (symbol.toUpperCase() == 'PLTZ') {
+              print('🔍 [PLTZ 차트 API 응답] 상세 분석:');
+              for (int i = 0; i < output.length && i < 3; i++) {
+                final item = output[i];
+                print('  - Item $i:');
+                print('    - date: ${item['xymd']}');
+                print('    - close: ${item['clos']}');
+                print('    - tvol: ${item['tvol']}');
+                print('    - volume: ${item['volume']}');
+                print('    - acml_vol: ${item['acml_vol']}');
+                print('    - all keys: ${item.keys.toList()}');
+              }
+            }
+            
             // API 응답을 과거→최신 순서로 정렬
             final sortedOutput = List.from(output);
             sortedOutput.sort((a, b) {
@@ -983,26 +1059,92 @@ class KisUnifiedApiService {
 
   /// 해외주식 일별시세 아이템 파싱 (dailyprice API 필드명 사용)
   Map<String, dynamic> _parseOverseasDailyPriceItem(Map<String, dynamic> item) {
-    // 디버깅: NVDL 거래량 특별 로깅
-    final symbol = item['symb'] ?? '';
-    if (symbol.toUpperCase() == 'NVDL') {
-      print('🔍 [NVDL 일별시세 디버깅] 일별시세 아이템 필드들: ${item.keys.toList()}');
-      print('🔍 [NVDL 일별시세 디버깅] 일별시세 아이템 값들: $item');
-      print('🔍 [NVDL 일별시세 디버깅] 거래량 필드들:');
+    // 디버깅: NVD 거래량 특별 로깅
+    final symbol = item['code'] ?? item['symb'] ?? '';
+    if (symbol.toUpperCase() == 'NVD') {
+      print('🔍 [NVD 일별시세 디버깅] 일별시세 아이템 필드들: ${item.keys.toList()}');
+      print('🔍 [NVD 일별시세 디버깅] 일별시세 아이템 값들: $item');
+      print('🔍 [NVD 일별시세 디버깅] 거래량 필드들:');
       print('  - tvol: ${item['tvol']}');
       print('  - volume: ${item['volume']}');
       print('  - acml_vol: ${item['acml_vol']}');
+      print('  - pvol: ${item['pvol']}');
+      print('  - bvol: ${item['bvol']}');
+      print('  - avol: ${item['avol']}');
+    }
+    
+    // 디버깅: PLTZ 거래량 특별 로깅
+    if (symbol.toUpperCase() == 'PLTZ') {
+      print('🔍 [PLTZ 일별시세 디버깅] 일별시세 아이템 필드들: ${item.keys.toList()}');
+      print('🔍 [PLTZ 일별시세 디버깅] 일별시세 아이템 값들: $item');
+      print('🔍 [PLTZ 일별시세 디버깅] 거래량 필드들:');
+      print('  - tvol: ${item['tvol']}');
+      print('  - volume: ${item['volume']}');
+      print('  - acml_vol: ${item['acml_vol']}');
+      print('  - pvol: ${item['pvol']}');
+      print('  - bvol: ${item['bvol']}');
+      print('  - avol: ${item['avol']}');
     }
     
     // KIS API 해외주식 일별시세의 공식 필드명들 사용
+    // 거래량 필드 우선순위: tvol > volume > acml_vol > pvol > bvol > avol
+    final volume = parseInt(item['tvol'] ?? item['volume'] ?? item['acml_vol'] ?? item['pvol'] ?? item['bvol'] ?? item['avol'] ?? 0);
+    
+    if (symbol.toUpperCase() == 'NVD') {
+      print('🔍 [NVD 일별시세 디버깅] 최종 거래량: $volume');
+    }
+    
+    if (symbol.toUpperCase() == 'PLTZ') {
+      print('🔍 [PLTZ 일별시세 디버깅] 최종 거래량: $volume');
+    }
+    
     return {
       'date': item['xymd'] ?? item['date'] ?? DateTime.now().toString().substring(0, 10), // 일자
       'open': parseDouble(item['open'] ?? 0), // 시가
       'high': parseDouble(item['high'] ?? 0), // 고가
       'low': parseDouble(item['low'] ?? 0), // 저가
       'close': parseDouble(item['clos'] ?? item['close'] ?? 0), // 종가
-      'volume': parseInt(item['tvol'] ?? item['volume'] ?? 0), // 거래량
+      'volume': volume, // 거래량 (우선순위 적용)
+      'tvol': parseInt(item['tvol'] ?? 0), // 총 거래량 (우선 사용)
+      'acml_vol': parseInt(item['acml_vol'] ?? 0), // 누적 거래량
     };
+  }
+
+  /// 해외주식 차트 데이터 서버 저장 (서버 Functions 실패 대비)
+  Future<void> _saveOverseasChartDataToServer(String symbol, List<Map<String, dynamic>> chartData) async {
+    try {
+      print('🔍 [해외주식 차트 저장] 서버 저장 시도: $symbol (${chartData.length}개)');
+      
+      // Firestore에 직접 저장
+      final db = FirebaseFirestore.instance;
+      final batch = db.batch();
+      
+      for (final data in chartData) {
+        final date = data['date']?.toString() ?? '';
+        if (date.isEmpty) continue;
+        
+        final docRef = db.collection('charts').doc(symbol).collection('daily').doc(date);
+        batch.set(docRef, {
+          'stock_code': symbol,
+          'market': 'NASDAQ',
+          'date': date,
+          'date_ts': int.tryParse(date.replaceAll('-', '')) ?? 0,
+          'open': (data['open'] ?? 0.0).toDouble(),
+          'high': (data['high'] ?? 0.0).toDouble(),
+          'low': (data['low'] ?? 0.0).toDouble(),
+          'close': (data['close'] ?? 0.0).toDouble(),
+          'volume': (data['volume'] ?? 0).toInt(),
+          'trade_amount': data['trade_amount'],
+          'updated_at': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+      
+      await batch.commit();
+      print('✅ [해외주식 차트 저장] 서버 저장 완료: $symbol');
+      
+    } catch (e) {
+      print('❌ [해외주식 차트 저장] 서버 저장 실패: $symbol - $e');
+    }
   }
 
   /// ========================================
@@ -1011,82 +1153,14 @@ class KisUnifiedApiService {
   
   /// 종목 코드로 자동 판별하여 현재가 조회
   Future<Map<String, dynamic>?> getStockPrice(String stockCode) async {
-    // 해외주식 판별 (대문자 영문 1-5자리)
-    if (RegExp(r'^[A-Z]{1,5}$').hasMatch(stockCode)) {
-      // 여러 거래소 시도 (KIS API 공식 코드)
-      final exchanges = ['NAS', 'NYS', 'AMS']; // NAS: 나스닥, NYS: 뉴욕, AMS: 아메리칸
-      
-      for (final exchange in exchanges) {
-        final result = await getOverseasStockPrice(
-          symbol: stockCode,
-          exchangeCode: exchange,
-        );
-        if (result != null && result.isNotEmpty) {
-          print('✅ [통일API] $stockCode 현재가 조회 성공 (거래소: $exchange)');
-          return result;
-        }
-      }
-      
-      print('❌ [통일API] $stockCode 모든 거래소에서 현재가 조회 실패');
-      return null;
-    } else {
-      return await getDomesticStockPrice(stockCode: stockCode);
-    }
+    // 서버 전환: 클라이언트에서 통일API 호출 금지
+    return null;
   }
 
   /// 종목 코드로 자동 판별하여 일별 차트 조회
   Future<List<Map<String, dynamic>>> getDailyChart(String stockCode, {int count = ChartConstants.CHART_MIN_BARS}) async {
-    final periodCode = 'D';
-    final cacheKey = _chartKey(stockCode, periodCode, count);
-
-    // 1) 캐시 히트 시 즉시 반환
-    if (_isFresh(_chartCacheAt[cacheKey]) && (_chartCache[cacheKey]?.isNotEmpty ?? false)) {
-      return _chartCache[cacheKey]!;
-    }
-
-    // 2) 동일 키 인플라이트 콜이 있으면 해당 Future 대기하여 중복 호출 방지
-    if (_inflightChart.containsKey(cacheKey)) {
-      return await _inflightChart[cacheKey]!;
-    }
-
-    // 3) 새 요청 수행 (해외/국내 병렬 시도로 지연 최소화)
-    final completer = Completer<List<Map<String, dynamic>>>();
-    _inflightChart[cacheKey] = completer.future;
-
-    () async {
-      try {
-        final isOverseas = RegExp(r'^[A-Z]{1,5}$').hasMatch(stockCode);
-        if (isOverseas) {
-          // 해외: 다중 거래소 병렬 시도 → 첫 성공 결과 채택
-          final List<String> exchanges = ['NAS', 'NYS', 'AMS'];
-          final futures = exchanges.map((ex) => getOverseasDailyChart(symbol: stockCode, exchangeCode: ex, count: count)).toList();
-          final results = await Future.wait(futures);
-          final firstNonEmpty = results.firstWhere((r) => r.isNotEmpty, orElse: () => const []);
-          if (firstNonEmpty.isNotEmpty) {
-            _chartCache[cacheKey] = firstNonEmpty;
-            _chartCacheAt[cacheKey] = DateTime.now();
-            completer.complete(firstNonEmpty);
-            return;
-          }
-          print('❌ [통일API] $stockCode 모든 거래소에서 차트 데이터 조회 실패');
-          completer.complete(const []);
-          return;
-        } else {
-          final data = await getDomesticDailyChart(stockCode: stockCode, count: count);
-          if (data.isNotEmpty) {
-            _chartCache[cacheKey] = data;
-            _chartCacheAt[cacheKey] = DateTime.now();
-          }
-          completer.complete(data);
-        }
-      } catch (e) {
-        completer.complete(const []);
-      } finally {
-        _inflightChart.remove(cacheKey);
-      }
-    }();
-
-    return await _inflightChart[cacheKey]!;
+    // 서버 전환: 클라이언트에서 통일API 호출 금지
+    return const [];
   }
 
   /// ========================================
@@ -1403,39 +1477,9 @@ class KisUnifiedApiService {
   
   /// 통합 계좌 정보 조회
   Future<Map<String, dynamic>?> getUnifiedAccountInfo() async {
-    try {
-      print('💰 [통일API] 통합 계좌 정보 조회 시작');
-      
-      final cano = extractCano();
-      final acntPrdtCd = extractPrdtCd();
-      
-      // 1. 국내 계좌 잔고 조회
-      final domesticBalance = await getDomesticAccountBalance(
-        cano: cano,
-        acntPrdtCd: acntPrdtCd,
-      );
-      
-      // 2. 해외 계좌 잔고 조회
-      final overseasBalance = await getOverseasAccountBalance(
-        cano: cano,
-        acntPrdtCd: acntPrdtCd,
-      );
-      
-      // 3. 결과 통합
-      final result = {
-        'domestic': domesticBalance,
-        'overseas': overseasBalance,
-        'domesticHoldings': domesticBalance?['holdings'] ?? [],
-        'overseasHoldings': overseasBalance?['holdings'] ?? [],
-        'timestamp': DateTime.now().toIso8601String(),
-      };
-      
-      print('✅ [통일API] 통합 계좌 정보 조회 완료');
-      return result;
-    } catch (e) {
-      print('❌ [통일API] 통합 계좌 정보 조회 오류: $e');
-      return null;
-    }
+    // 서버 전환: 클라이언트 계좌 API 비활성화
+    print('⛔ [통일API] getUnifiedAccountInfo 비활성화(서버 전용)');
+    return null;
   }
   
   /// 보유종목 조회 (호환성) - 국내 + 해외 통합
@@ -1443,92 +1487,18 @@ class KisUnifiedApiService {
     try {
       final cano = extractCano();
       final acntPrdtCd = extractPrdtCd();
-      
-      print('📋 [통일API] 통합 보유종목 조회 시작 (국내 + 해외)');
-      
-      // 1. 국내 보유종목 조회
+      // 국내 잔고에서 보유종목 추출
       final domestic = await getDomesticAccountBalance(
         cano: cano,
         acntPrdtCd: acntPrdtCd,
       );
-      
-      // 2. 해외 보유종목 조회
-      // 기본(NASD) 조회에 더해 다양한 거래소/상품코드 변형까지 커버
-      final overseasNasdDefault = await getOverseasAccountBalance(
-        cano: cano,
-        acntPrdtCd: acntPrdtCd,
-      );
-      List<Map<String, dynamic>> overseasNasdVariants = [];
-      List<Map<String, dynamic>> overseasNyseVariants = [];
-      List<Map<String, dynamic>> overseasAmexVariants = [];
-      try {
-        overseasNasdVariants = await getOverseasPresentBalanceCompat(exchangeCode: 'NASD');
-      } catch (_) {}
-      try {
-        overseasNyseVariants = await getOverseasPresentBalanceCompat(exchangeCode: 'NYSE');
-      } catch (_) {}
-      try {
-        overseasAmexVariants = await getOverseasPresentBalanceCompat(exchangeCode: 'AMEX');
-      } catch (_) {}
-      
       List<Map<String, dynamic>> positions = [];
-      
-      // 3. 국내 보유종목 추가
       if (domestic != null && domestic['holdings'] != null) {
-        final domesticHoldings = List<Map<String, dynamic>>.from(domestic['holdings']);
-        positions.addAll(domesticHoldings);
-        print('✅ [통일API] 국내 보유종목: ${domesticHoldings.length}개');
-        if (domesticHoldings.isNotEmpty) {
-          print('   - 국내 샘플 keys: ${domesticHoldings.first.keys.toList()}');
-        }
+        positions.addAll(List<Map<String, dynamic>>.from(domestic['holdings']));
       }
-      
-      // 4. 해외 보유종목 추가
-      if (overseasNasdDefault != null && overseasNasdDefault['holdings'] != null) {
-        final overseasHoldings = List<Map<String, dynamic>>.from(overseasNasdDefault['holdings']);
-        positions.addAll(overseasHoldings);
-        print('✅ [통일API] 해외 보유종목(NASD 기본): ${overseasHoldings.length}개');
-        if (overseasHoldings.isNotEmpty) {
-          print('   - 해외(NASD 기본) 샘플 keys: ${overseasHoldings.first.keys.toList()}');
-        }
-      }
-      if (overseasNasdVariants.isNotEmpty) {
-        positions.addAll(overseasNasdVariants);
-        print('✅ [통일API] 해외 보유종목(NASD variants): ${overseasNasdVariants.length}개');
-        print('   - 해외(NASD variants) 첫 샘플 keys: ${overseasNasdVariants.first.keys.toList()}');
-      }
-      if (overseasNyseVariants.isNotEmpty) {
-        positions.addAll(overseasNyseVariants);
-        print('✅ [통일API] 해외 보유종목(NYSE variants): ${overseasNyseVariants.length}개');
-        print('   - 해외(NYSE variants) 첫 샘플 keys: ${overseasNyseVariants.first.keys.toList()}');
-      }
-      if (overseasAmexVariants.isNotEmpty) {
-        positions.addAll(overseasAmexVariants);
-        print('✅ [통일API] 해외 보유종목(AMEX variants): ${overseasAmexVariants.length}개');
-        print('   - 해외(AMEX variants) 첫 샘플 keys: ${overseasAmexVariants.first.keys.toList()}');
-      }
-
-      // 5. 중복 제거 (pdno|stockCode|symbol|symb 기준)
-      final seen = <String>{};
-      final deduped = <Map<String, dynamic>>[];
-      for (final p in positions) {
-        final key = (p['pdno'] ?? p['stockCode'] ?? p['stock_code'] ?? p['symbol'] ?? p['symb'] ?? '').toString();
-        if (key.isEmpty) {
-          deduped.add(p);
-          continue;
-        }
-        if (seen.add(key)) {
-          deduped.add(p);
-        }
-      }
-      
-      print('✅ [통일API] 총 보유종목: ${deduped.length}개 (국내 + 해외)');
-      if (deduped.isNotEmpty) {
-        print('   - 통합 샘플: ${deduped.first}');
-      }
-      return deduped;
+      return positions;
     } catch (e) {
-      print('❌ [통일API] 보유종목 조회 오류: $e');
+      print('❌ [통일API] getPositionsCompat 오류: $e');
       return [];
     }
   }
@@ -1597,25 +1567,9 @@ class KisUnifiedApiService {
   
   /// 해외주식 체결내역 조회 (호환성)
   Future<List<Map<String, dynamic>>> getOverseasExecutionsCompat({int limit = 100}) async {
-    try {
-      final cano = extractCano();
-      final acntPrdtCd = extractPrdtCd();
-      
-      // 최근 7일간의 거래내역 조회
-      final endDate = DateTime.now();
-      final startDate = endDate.subtract(const Duration(days: 7));
-      
-      final transactions = await getOverseasPeriodTransactions(
-        startDate: '${startDate.year}${startDate.month.toString().padLeft(2, '0')}${startDate.day.toString().padLeft(2, '0')}',
-        endDate: '${endDate.year}${endDate.month.toString().padLeft(2, '0')}${endDate.day.toString().padLeft(2, '0')}',
-        exchangeCode: 'NASD',
-      );
-      
-      return transactions.take(limit).toList();
-    } catch (e) {
-      print('❌ [통일API] 해외주식 체결내역 조회 오류: $e');
-      return [];
-    }
+    // 서버 전환: 클라이언트 체결내역 API 비활성화
+    print('⛔ [통일API] getOverseasExecutionsCompat 비활성화(서버 전용)');
+    return [];
   }
   
   /// 해외주식 결제준비금 조회 (호환성)
@@ -1697,18 +1651,9 @@ class KisUnifiedApiService {
   
   /// 계좌 잔고 조회 (기존 호환성)
   Future<Map<String, dynamic>?> getAccountBalanceCompat() async {
-    try {
-      final cano = extractCano();
-      final acntPrdtCd = extractPrdtCd();
-      
-      return await getUnifiedAccountBalance(
-        cano: cano,
-        acntPrdtCd: acntPrdtCd,
-      );
-    } catch (e) {
-      print('❌ [통일API] 계좌 잔고 조회 오류: $e');
-      return null;
-    }
+    // 서버 전환: 클라이언트 잔고 API 비활성화
+    print('⛔ [통일API] getAccountBalanceCompat 비활성화(서버 전용)');
+    return null;
   }
   
   /// 해외주식 미체결 주문 조회
@@ -1872,16 +1817,9 @@ class KisUnifiedApiService {
   
   /// 연결 상태 확인
   Future<bool> isConnected() async {
-    try {
-      // 간단한 API 호출로 연결 상태 확인
-      final cano = extractCano();
-      final acntPrdtCd = extractPrdtCd();
-      await getDomesticAccountBalance(cano: cano, acntPrdtCd: acntPrdtCd);
-      return true;
-    } catch (e) {
-      print('❌ [통일API] 연결 상태 확인 실패: $e');
-      return false;
-    }
+    // 서버 전환: 클라이언트 연결 확인 비활성화
+    print('⛔ [통일API] isConnected 비활성화(서버 전용)');
+    return false;
   }
   
   /// 국내주식 현재가 조회 (호환성)

@@ -9,7 +9,7 @@ import '../remote/analysis_functions_service.dart';
 import 'volume_threshold_manager.dart';
 import 'market_time_validator.dart';
 import '../database/repositories/current_price_repository.dart';
-import '../api/kis_unified_api_service.dart';
+// Unified API 제거: 서버 프록시(RemoteKisService)만 사용
 import '../remote/remote_kis_service.dart';
 
 // 투자 스타일별 파라미터 데이터 클래스 (7개 지표 시스템 기반)
@@ -1530,15 +1530,14 @@ class StyleBasedBacktester {
       print('📊 백테스트 기간: ${from.toString().substring(0, 10)} ~ ${to.toString().substring(0, 10)} ($daysDiff일)');
       onProgress?.call('백테스트 기간 설정: ${from.toString().substring(0, 10)} ~ ${to.toString().substring(0, 10)} ($daysDiff일)');
       
-      // KIS API 서비스 가져오기
-      final unifiedApiService = KisUnifiedApiService();
+      // KIS Unified API 제거: RemoteKisService만 사용
       
       // 1단계: 전체 기간의 데이터를 한번에 수집 (사용자 선택 기간)
       onProgress?.call('$daysDiff일 데이터 수집 중...');
       print('🔄 API 데이터 수집 시작 ($daysDiff일)...');
       
       final allBacktestData = await _collectAllBacktestData(
-        unifiedApiService, 
+        null, 
         stockCodes, 
         watchlistData, 
         from, 
@@ -1774,9 +1773,9 @@ class StyleBasedBacktester {
 
 
 
-  /// 전체 기간의 백테스트 데이터 수집 (로컬DB 사용)
+  /// 전체 기간의 백테스트 데이터 수집 (서버 캐시 차트 사용)
   Future<Map<String, List<Map<String, dynamic>>>> _collectAllBacktestData(
-    dynamic unifiedApiService,
+    dynamic _,
     List<String> stockCodes,
     List<Map<String, dynamic>> watchlistData,
     DateTime from,
@@ -1808,15 +1807,11 @@ class StyleBasedBacktester {
         bool isOverseasStock = marketType == 'overseas' || 
                                (stockCode.length >= 4 && RegExp(r'^[A-Z]+$').hasMatch(stockCode));
         
-        // 로컬DB에서 차트 데이터 가져오기 (분석탭과 동일한 방식)
-        List<Map<String, dynamic>> chartData;
-        if (isOverseasStock) {
-          // 해외주식: 로컬DB에서 최근 200일 데이터 조회
-          chartData = await _getLocalOverseasChartData(stockCode, from, to);
-        } else {
-          // 국내주식: 로컬DB에서 최근 200일 데이터 조회
-          chartData = await _getLocalDomesticChartData(stockCode, from, to);
-        }
+        // 서버 캐시된 일봉(최소 100일) 사용
+        final chartData = await RemoteKisService.instance.getDailyChart(
+          stockCode,
+          days: 100,
+        );
         
         if (chartData.isEmpty) {
           print('⚠️ $stockCode: 차트 데이터 없음');
@@ -2219,8 +2214,7 @@ class StyleBasedBacktester {
       
       print('📊 백테스트 기간: ${from.toString().substring(0, 10)} ~ ${to.toString().substring(0, 10)}');
       
-      // KIS API 서비스 가져오기
-      final unifiedApiService = KisUnifiedApiService();
+      // Unified API 제거
       
       // 실제 API 데이터로 백테스트용 데이터 생성
       List<StockData> historicalData = [];
@@ -2629,13 +2623,7 @@ class StyleBasedBacktester {
       print('📊 요청 종목: $stockCodes');
       print('📅 요청 기간: ${startDate?.toString().substring(0, 10) ?? 'N/A'} ~ ${endDate?.toString().substring(0, 10) ?? 'N/A'}');
       
-      // KIS API 서비스 인스턴스 가져오기
-      final unifiedApiService = KisUnifiedApiService();
-      print('🔧 KIS API 서비스 상태: ${unifiedApiService.isAuthenticated}');
-      
-      // API 설정 확인
-      final apiConfig = unifiedApiService.apiConfig;
-      print('🔧 API 설정: $apiConfig');
+      // Unified API 제거: RemoteKisService 사용
       
       // 각 종목별로 데이터 요청 (분석탭과 동일한 방식)
       for (final stockCode in stockCodes) { // 모든 종목 처리 (나스닥 포함)
@@ -2988,7 +2976,7 @@ class StyleBasedBacktester {
 
   /// 특정 날짜의 종목 데이터 가져오기
   Future<StockData?> _getStockDataForDate(
-    dynamic unifiedApiService,
+    dynamic _,
     String stockCode,
     DateTime date,
     bool isOverseasStock,
@@ -2996,13 +2984,10 @@ class StyleBasedBacktester {
   ) async {
     try {
       // 해당 날짜의 차트 데이터 가져오기
-      List<Map<String, dynamic>> chartData;
-      
-      if (isOverseasStock) {
-        chartData = await unifiedApiService.getOverseasDailyChart(stockCode, count: 100);
-      } else {
-        chartData = await unifiedApiService.getDomesticDailyChart(stockCode, count: 100);
-      }
+      List<Map<String, dynamic>> chartData = await RemoteKisService.instance.getDailyChart(
+        stockCode,
+        days: 100,
+      );
       
       if (chartData.isEmpty) return null;
       
@@ -3125,62 +3110,16 @@ class StyleBasedBacktester {
     return tradeCount;
   }
 
-  /// 로컬DB에서 국내주식 차트 데이터 가져오기
+  /// 로컬DB 접근 제거: 서버 캐시 차트 사용
   Future<List<Map<String, dynamic>>> _getLocalDomesticChartData(String stockCode, DateTime from, DateTime to) async {
-    try {
-      print('📊 로컬DB에서 국내주식 차트 데이터 조회: $stockCode (${from.toString().substring(0, 10)} ~ ${to.toString().substring(0, 10)})');
-      
-      // AppDataManager를 통해 백테스트용 과거 데이터 조회
-      final appDataManager = AppDataManager.instance;
-      
-      // 백테스트 기간에 맞춰 과거 데이터 조회
-      final daysDiff = to.difference(from).inDays;
-      final maxCount = daysDiff > 200 ? 200 : daysDiff;
-      
-      // 백테스트용 과거 데이터 조회 (200일치)
-      final chartData = await appDataManager.getBacktestData(stockCode, days: maxCount);
-      
-      if (chartData.isEmpty) {
-        print('⚠️ 로컬DB에 $stockCode 백테스트 데이터 없음 (요청: $maxCount일치)');
-        return [];
-      }
-      
-      print('✅ 로컬DB에서 $stockCode 백테스트 데이터 조회 완료: ${chartData.length}일치');
-      return chartData;
-      
-    } catch (e) {
-      print('❌ 로컬DB 국내주식 차트 데이터 조회 실패: $stockCode - $e');
-      return [];
-    }
+    print('📊 서버 캐시 차트 사용(국내): $stockCode (요청일자: ${from.toString().substring(0, 10)} ~ ${to.toString().substring(0, 10)})');
+    return await RemoteKisService.instance.getDailyChart(stockCode, days: 100);
   }
 
-  /// 로컬DB에서 해외주식 차트 데이터 가져오기
+  /// 로컬DB 접근 제거: 서버 캐시 차트 사용(해외)
   Future<List<Map<String, dynamic>>> _getLocalOverseasChartData(String stockCode, DateTime from, DateTime to) async {
-    try {
-      print('📊 로컬DB에서 해외주식 차트 데이터 조회: $stockCode (${from.toString().substring(0, 10)} ~ ${to.toString().substring(10)})');
-      
-      // AppDataManager를 통해 백테스트용 과거 데이터 조회
-      final appDataManager = AppDataManager.instance;
-      
-      // 백테스트 기간에 맞춰 과거 데이터 조회
-      final daysDiff = to.difference(from).inDays;
-      final maxCount = daysDiff > 200 ? 200 : daysDiff;
-      
-      // 백테스트용 과거 데이터 조회 (200일치)
-      final chartData = await appDataManager.getBacktestData(stockCode, days: maxCount);
-      
-      if (chartData.isEmpty) {
-        print('⚠️ 로컬DB에 $stockCode 해외주식 백테스트 데이터 없음 (요청: $maxCount일치)');
-        return [];
-      }
-      
-      print('✅ 로컬DB에서 $stockCode 해외주식 백테스트 데이터 조회 완료: ${chartData.length}일치');
-      return chartData;
-      
-    } catch (e) {
-      print('❌ 로컬DB 해외주식 차트 데이터 조회 실패: $stockCode - $e');
-      return [];
-    }
+    print('📊 서버 캐시 차트 사용(해외): $stockCode (요청일자: ${from.toString().substring(0, 10)} ~ ${to.toString().substring(0, 10)})');
+    return await RemoteKisService.instance.getDailyChart(stockCode, days: 100);
   }
 
   /// 백테스트 결과 계산

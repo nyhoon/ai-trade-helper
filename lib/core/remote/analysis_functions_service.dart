@@ -1,4 +1,5 @@
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 /// Firebase Functions 호출 래퍼 (onCall)
 /// - analyzeStock
@@ -13,6 +14,23 @@ class AnalysisFunctionsService {
 
   final FirebaseFunctions _functions;
 
+  /// Firebase Auth 상태 확인 및 재로그인
+  Future<void> _ensureAuthenticated() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        print('⚠️ [AnalysisFunctionsService] 사용자 인증 정보 없음, 익명 로그인 시도...');
+        await FirebaseAuth.instance.signInAnonymously();
+        print('✅ [AnalysisFunctionsService] 익명 로그인 완료');
+      } else {
+        print('✅ [AnalysisFunctionsService] 사용자 인증 상태 확인: ${user.uid}');
+      }
+    } catch (e) {
+      print('❌ [AnalysisFunctionsService] 인증 확인 실패: $e');
+      // 인증 실패해도 Functions 호출은 시도 (일부 Functions는 인증 불필요)
+    }
+  }
+
   /// 단일 종목 분석 호출
   /// - symbol: 종목 코드
   /// - days: 조회 일수(기본 100)
@@ -23,6 +41,9 @@ class AnalysisFunctionsService {
     double? buyThreshold,
     double? sellThreshold,
   }) async {
+    // Firebase Auth 상태 확인
+    await _ensureAuthenticated();
+    
     final callable = _functions.httpsCallable('analyzeStock');
     final result = await callable.call(<String, dynamic>{
       'symbol': symbol,
@@ -43,6 +64,10 @@ class AnalysisFunctionsService {
     int days = 100,
   }) async {
     if (symbols.isEmpty) return <Map<String, dynamic>>[];
+    
+    // Firebase Auth 상태 확인
+    await _ensureAuthenticated();
+    
     final callable = _functions.httpsCallable('analyzeMultipleStocks');
     final result = await callable.call(<String, dynamic>{
       'symbols': symbols,
@@ -64,6 +89,9 @@ class AnalysisFunctionsService {
     required String uid,
     int days = 100,
   }) async {
+    // Firebase Auth 상태 확인
+    await _ensureAuthenticated();
+    
     final callable = _functions.httpsCallable('analyzeWatchlist');
     final result = await callable.call(<String, dynamic>{
       'uid': uid,
@@ -84,6 +112,9 @@ class AnalysisFunctionsService {
     required String uid,
     int days = 100,
   }) async {
+    // Firebase Auth 상태 확인
+    await _ensureAuthenticated();
+    
     final callable = _functions.httpsCallable('analyzeHoldings');
     final result = await callable.call(<String, dynamic>{
       'uid': uid,
@@ -104,6 +135,9 @@ class AnalysisFunctionsService {
     required String uid,
     int limit = 10,
   }) async {
+    // Firebase Auth 상태 확인
+    await _ensureAuthenticated();
+    
     final callable = _functions.httpsCallable('getTopRecommendations');
     final result = await callable.call(<String, dynamic>{
       'uid': uid,

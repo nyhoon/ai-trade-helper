@@ -141,10 +141,8 @@ class RealtimePriceService {
       }
       
       // 통합된 API 서비스를 통해 WebSocket 연결 생성
-      final unifiedApiService = KisUnifiedApiService();
-      _channel = await unifiedApiService.createWebSocketConnection(
-        approvalKey: accessKey,
-      );
+      // 서버 전환: 클라이언트 WebSocket 비활성화
+      return;
       
       if (_channel == null) {
         throw Exception('WebSocket 연결 생성 실패');
@@ -158,7 +156,7 @@ class RealtimePriceService {
         (message) => _handleWebSocketMessage(message),
         onError: (error) {
           print('❌ WebSocket 오류: $error');
-          unifiedApiService.handleWebSocketError(error);
+          // 서버 전환: 통일API 에러 핸들러 제거
           _handleDisconnection();
         },
         onDone: () {
@@ -177,9 +175,8 @@ class RealtimePriceService {
   Future<String?> _getWebSocketAccessKey() async {
     try {
       // 통합된 API 서비스를 통해 WebSocket 접속키 발급
-      final unifiedApiService = KisUnifiedApiService();
-      final response = await unifiedApiService.getWebSocketAccessToken();
-      final approvalKey = response?['approval_key'] as String?;
+      // 서버 전환: 사용 안함
+      final approvalKey = null;
       
       if (approvalKey == null || approvalKey.isEmpty) {
         print('⚠️ WebSocket 접속키가 비어있음');
@@ -269,33 +266,8 @@ class RealtimePriceService {
   /// WebSocket 메시지 처리
   void _handleWebSocketMessage(dynamic message) {
     try {
-      final unifiedApiService = KisUnifiedApiService();
-      
-      // 통합된 API 서비스를 통해 메시지 파싱
-      final messageData = unifiedApiService.parseWebSocketMessage(message);
-      if (messageData == null) {
-        return;
-      }
-      
-      // PING 메시지 처리
-      if (unifiedApiService.isPingMessage(messageData)) {
-        _handlePingMessage();
-        return;
-      }
-      
-      // 실시간 체결가 데이터 처리
-      final priceData = unifiedApiService.parseRealtimePriceData(messageData);
-      if (priceData != null) {
-        final stockCode = priceData['stockCode'] as String;
-        final price = priceData['currentPrice'] as double;
-        final timestamp = DateTime.now();
-        
-        // 가격 업데이트
-        _updatePrice(stockCode, price, timestamp);
-        
-        // 가격 변동 체크
-        _checkPriceChange(stockCode, price);
-      }
+      // 서버 전환: 실시간 메시지 처리 비활성화
+      return;
       
     } catch (e) {
       print('❌ WebSocket 메시지 처리 실패: $e');
@@ -465,7 +437,8 @@ class RealtimePriceService {
   /// 현재 가격 조회
   Future<double> _getCurrentPrice(String stockCode) async {
     try {
-      final data = await KisUnifiedApiService().getStockPrice(stockCode);
+      // 서버 전환: 통일API 호출 제거
+      final data = null;
       return (data?['currentPrice'] as num?)?.toDouble() ?? 0.0;
     } catch (e) {
       print('❌ 현재 가격 조회 실패: $stockCode - $e');
@@ -511,12 +484,10 @@ class RealtimePriceService {
   /// PONG 응답 전송 (통합된 API 서비스 사용)
   Future<void> _sendPong() async {
     if (_isConnected && _channel != null) {
-      final unifiedApiService = KisUnifiedApiService();
-      final approvalKey = await _getWebSocketAccessKey();
+      // 서버 전환: WebSocket 미사용
+      final approvalKey = null;
       
-      if (approvalKey != null) {
-        await unifiedApiService.sendPongMessage(_channel!, approvalKey);
-      }
+      // 서버 전환: PONG 전송 비활성화
     }
   }
 
@@ -556,8 +527,7 @@ class RealtimePriceService {
       _fallbackPriceTimer?.cancel(); // 폴백 타이머 중지
       
       // 통합된 API 서비스를 통해 WebSocket 연결 종료
-      final unifiedApiService = KisUnifiedApiService();
-      await unifiedApiService.closeWebSocketConnection(_channel);
+      // 서버 전환: WebSocket 미사용
       _channel = null;
       
       _subscribedStocks.clear();

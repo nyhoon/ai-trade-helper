@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../../core/utils/formatters.dart';
+import '../../../core/utils/stock_utils.dart';
 
 typedef GetAnalysisForCode = Map<String, dynamic>? Function(String stockCode);
 typedef IsNasdaqStock = bool Function(String stockCode);
@@ -28,36 +29,49 @@ class StockHeader extends StatelessWidget {
 
     final analysis = getAnalysisForCode(stockCode);
 
-    final double currentPrice = (currentPriceData?['currentPrice'] ?? analysis?['currentPrice'] ?? 0.0).toDouble();
-    final double openPrice = (currentPriceData?['openPrice'] ?? analysis?['openPrice'] ?? currentPrice).toDouble();
-    
-    // 🔧 디버깅: openPrice 값 확인
-    print('🔍 [StockHeader] openPrice 디버깅:');
-    print('  - currentPriceData?[\'openPrice\']: ${currentPriceData?['openPrice']}');
-    print('  - analysis?[\'openPrice\']: ${analysis?['openPrice']}');
-    print('  - 최종 openPrice: $openPrice');
-    
-    // 🔧 디버깅: 데이터 확인
-    print('🔍 [StockHeader] 데이터 확인:');
-    print('  - currentPriceData: $currentPriceData');
-    print('  - analysis: $analysis');
-    print('  - currentPrice: $currentPrice');
-    print('  - openPrice: $openPrice');
+    double _toDouble(dynamic v) {
+      if (v == null) return 0.0;
+      if (v is num) return v.toDouble();
+      return double.tryParse(v.toString()) ?? 0.0;
+    }
 
-    final double priceChange = currentPrice - openPrice;
-    final double priceChangePercent = openPrice > 0 ? (priceChange / openPrice) * 100 : 0.0;
+    // 현재가 소스 우선순위: item.currentPriceData → 전달된 currentPriceData → analysis.currentPriceData → analysis.priceData → analysis.technicalData → {}
+    final Map<String, dynamic> priceMap = Map<String, dynamic>.from(
+      (item['currentPriceData'] as Map?) ??
+      (currentPriceData as Map?) ??
+      (analysis?['currentPriceData'] as Map?) ??
+      (analysis?['priceData'] as Map?) ??
+      (analysis?['technicalData'] as Map?) ??
+      const {}
+    );
+
+    final double currentPrice = _toDouble(
+      priceMap['currentPrice'] ?? priceMap['current_price'] ?? priceMap['prpr']
+    );
+    final double openPrice = _toDouble(
+      priceMap['open'] ?? priceMap['openPrice'] ?? priceMap['open_price']
+    );
+    double prevClose = _toDouble(
+      priceMap['prevClose'] ?? priceMap['prev_close'] ?? priceMap['previous_close'] ?? priceMap['stck_prdy_clpr']
+    );
+    // 추가 폴백: 분석 블록에서 전일가 추출
+    if (prevClose == 0.0) {
+      prevClose = _toDouble(
+        (analysis?['prevClose']) ?? (analysis?['previousPrice']) ?? (analysis?['technicalData']?['previousPrice'])
+      );
+    }
+
+    // 등락 기준: 시가 우선, 없으면 전일가
+    final double baseline = openPrice > 0 ? openPrice : prevClose;
+    final double priceChangeFromBaseline = currentPrice - baseline;
+    final double priceChangePercent = baseline > 0 ? (priceChangeFromBaseline / baseline) * 100 : 0.0;
 
     final bool nasdaq = isNasdaqStock(stockCode);
 
-    final String currentPriceText = nasdaq
-        ? '\$${currentPrice.toStringAsFixed(2)}'
-        : Formatters.formatPrice(currentPrice);
-    final String openPriceText = nasdaq
-        ? '\$${openPrice.toStringAsFixed(2)}'
-        : Formatters.formatPrice(openPrice);
-    final String changeText = nasdaq
-        ? '${priceChange >= 0 ? '+' : ''}\$${priceChange.toStringAsFixed(2)} (${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toStringAsFixed(2)}%)'
-        : '${priceChange >= 0 ? '+' : ''}${Formatters.formatPrice(priceChange)} (${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toStringAsFixed(2)}%)';
+    // 통합 가격 포맷팅 사용
+    final String currentPriceText = StockUtils.instance.formatPrice(currentPrice, stockCode);
+    final String openPriceText = StockUtils.instance.formatPrice(openPrice, stockCode);
+    final String changeText = '${StockUtils.instance.formatChangeAmount(priceChangeFromBaseline, stockCode)} (${StockUtils.instance.formatChangeRate(priceChangePercent)})';
 
     return Row(
       children: [
@@ -67,11 +81,15 @@ class StockHeader extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  Text(
-                    stockName,
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
+                  Expanded(
+                    child: Text(
+                      stockName,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
                     ),
                   ),
                 ],
@@ -89,21 +107,39 @@ class StockHeader extends StatelessWidget {
         Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            // 현재가 + 등락률을 한 줄에 표시
+            // 현재가 + 등락금액 + 등락률(전일 대비) 한 줄 표시
             Text(
-              currentPrice > 0 ? '$currentPriceText (${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toStringAsFixed(2)}%)' : 'N/A',
+              currentPrice > 0
+                  ? '$currentPriceText ($changeText)'
+                  : 'N/A',
               style: TextStyle(
                 fontSize: 16,
                 fontWeight: FontWeight.bold,
                 color: currentPrice > 0
-                    ? (currentPrice >= openPrice ? Colors.red : Colors.blue)
+                    ? (priceChangeFromBaseline >= 0 ? Colors.red : Colors.blue)
                     : Colors.grey,
               ),
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
             ),
-            // 시가 + 등락금액을 한 줄에 표시
+            // 시가 + (시가 대비 등락금액) 표시
             Text(
-              openPrice > 0 ? '시가: $openPriceText (${priceChange >= 0 ? '+' : ''}${nasdaq ? '\$${priceChange.toStringAsFixed(2)}' : Formatters.formatPrice(priceChange)})' : '',
-              style: TextStyle(
+              () {
+                if (openPrice <= 0) return '';
+                final double changeFromOpen = currentPrice - openPrice;
+                return '시가: $openPriceText (${StockUtils.instance.formatChangeAmount(changeFromOpen, stockCode)})';
+              }(),
+              style: const TextStyle(
+                fontSize: 12,
+                color: Colors.grey,
+              ),
+            ),
+            // 전일가 별도 표시
+            Text(
+              prevClose > 0
+                  ? '전일: ${StockUtils.instance.formatPrice(prevClose, stockCode)}'
+                  : '',
+              style: const TextStyle(
                 fontSize: 12,
                 color: Colors.grey,
               ),

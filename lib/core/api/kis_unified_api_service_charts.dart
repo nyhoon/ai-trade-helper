@@ -140,10 +140,13 @@ extension KisUnifiedApiServiceCharts on KisUnifiedApiService {
 
       if (response.statusCode == 200 && response.data['rt_cd'] == '0') {
         final output = response.data['output2'] ?? [];
-        if (output is List) {
+        if (output is List && output.isNotEmpty) {
           final charts = output.take(count).map((item) => _parseDomesticChartItem(item)).toList();
           print('✅ [통일API] 국내주식 일별 차트 조회 성공: ${charts.length}개');
           return charts;
+        } else {
+          print('ℹ️ [통일API] 국내주식 일별 차트 데이터 없음: $stockCode');
+          return [];
         }
       }
       

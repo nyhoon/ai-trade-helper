@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../../../core/api/kis_unified_api_service.dart';
 import '../../../core/api/kis_unified_api_service_account.dart';
 import '../state/account_change.dart';
@@ -12,106 +14,40 @@ class LoadAccountDataUseCase {
   
   LoadAccountDataUseCase(this._apiService);
   
-  /// 계좌 데이터 로드 실행
+  /// 계좌 데이터 로드 실행 (서버 읽기 전용)
   Future<AccountChange> execute({bool silent = false}) async {
     try {
-      print('🔍 [UseCase] 계좌 데이터 로드 시작... (silent=$silent)');
-      
-      // KIS API 서비스 인스턴스 생성
-      final apiService = KisUnifiedApiService();
-      
-      // 계좌번호 추출
-      final cano = apiService.extractCano();
-      final acntPrdtCd = apiService.extractPrdtCd();
-      
-      print('🔍 [UseCase] 계좌번호: $cano-$acntPrdtCd');
-      
-      // 1. 국내 계좌 잔고 조회
-      print('📊 [UseCase] 국내 계좌 잔고 조회 시작...');
-      final domesticBalance = await apiService.getDomesticAccountBalance(
-        cano: cano,
-        acntPrdtCd: acntPrdtCd,
-      );
-      
-      // 2. 해외 계좌 잔고 조회 (나스닥)
-      print('📊 [UseCase] 해외 계좌 잔고 조회 시작 (나스닥)...');
-      print('📊 [UseCase] API 파라미터 - cano: $cano, acntPrdtCd: $acntPrdtCd, ovrsExcCd: NASD, trCrcyCd: USD');
-      final overseasNasdBalance = await apiService.getOverseasAccountBalance(
-        cano: cano,
-        acntPrdtCd: acntPrdtCd,
-        ovrsExcCd: 'NASD',
-        trCrcyCd: 'USD',
-      );
-      print('📊 [UseCase] 해외 나스닥 계좌 응답 타입: ${overseasNasdBalance.runtimeType}');
-      print('📊 [UseCase] 해외 나스닥 계좌 응답: $overseasNasdBalance');
-      if (overseasNasdBalance == null) {
-        print('❌ [UseCase] 해외 나스닥 계좌 API 호출 실패');
+      print('🔍 [UseCase] 계좌(서버) 데이터 로드 시작... (silent='+silent.toString()+')');
+
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid == null) {
+        return AccountDataLoadFailedChange('로그인 필요', 1);
       }
-      
-      // 3. 해외 계좌 잔고 조회 (뉴욕)
-      print('📊 [UseCase] 해외 계좌 잔고 조회 시작 (뉴욕)...');
-      print('📊 [UseCase] API 파라미터 - cano: $cano, acntPrdtCd: $acntPrdtCd, ovrsExcCd: NYSE, trCrcyCd: USD');
-      final overseasNyseBalance = await apiService.getOverseasAccountBalance(
-        cano: cano,
-        acntPrdtCd: acntPrdtCd,
-        ovrsExcCd: 'NYSE',
-        trCrcyCd: 'USD',
-      );
-      print('📊 [UseCase] 해외 뉴욕 계좌 응답 타입: ${overseasNyseBalance.runtimeType}');
-      print('📊 [UseCase] 해외 뉴욕 계좌 응답: $overseasNyseBalance');
-      if (overseasNyseBalance == null) {
-        print('❌ [UseCase] 해외 뉴욕 계좌 API 호출 실패');
-      }
-      
-      // 4. 주문가능금액 조회 (공식 API 사용)
-      print('📊 [UseCase] 주문가능금액 조회 시작...');
-      final domesticOrderableAmount = await apiService.getDomesticOrderableAmount(
-        cano: cano,
-        acntPrdtCd: acntPrdtCd,
-      );
-      print('📊 [UseCase] 국내 주문가능금액 응답: $domesticOrderableAmount');
-      
-      final overseasNasdOrderableAmount = await apiService.getOverseasOrderableAmount(
-        cano: cano,
-        acntPrdtCd: acntPrdtCd,
-        ovrsExcCd: 'NASD',
-      );
-      print('📊 [UseCase] 해외 나스닥 주문가능금액 응답: $overseasNasdOrderableAmount');
-      
-      final overseasNyseOrderableAmount = await apiService.getOverseasOrderableAmount(
-        cano: cano,
-        acntPrdtCd: acntPrdtCd,
-        ovrsExcCd: 'NYSE',
-      );
-      print('📊 [UseCase] 해외 뉴욕 주문가능금액 응답: $overseasNyseOrderableAmount');
-      
-      // 5. 데이터 통합
-      final integratedData = _integrateAccountData(
-        domesticBalance,
-        overseasNasdBalance,
-        overseasNyseBalance,
-        domesticOrderableAmount,
-        overseasNasdOrderableAmount,
-        overseasNyseOrderableAmount,
-      );
-      
-      if (integratedData != null) {
-        print('✅ [UseCase] 계좌 데이터 통합 완료');
-        print('📋 [UseCase] 국내 보유종목: ${integratedData['domesticHoldings']?.length ?? 0}개');
-        print('📋 [UseCase] 해외 보유종목: ${integratedData['overseasHoldings']?.length ?? 0}개');
-        print('💰 [UseCase] 국내 총 자산: ${integratedData['domesticTotalAssets']}원');
-        print('💰 [UseCase] 해외 총 자산: \$${integratedData['overseasTotalAssets']}');
-        
-        return AccountDataLoadedChange(integratedData);
-      } else {
-        print('⚠️ [UseCase] 계좌 데이터 통합 실패');
-        return AccountDataLoadFailedChange('계좌 데이터를 받지 못했습니다.', 1);
-      }
+
+      // 서버에 저장된 설정/계좌 요약 읽기 (마스킹/설정상태)
+      final doc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .collection('settings')
+          .doc('api')
+          .get();
+
+      final data = doc.data() ?? const {};
+      final isConfigured = data['isConfigured'] == true;
+      final maskedAccount = (data['maskedAccount'] ?? '') as String;
+
+      final result = {
+        'isConfigured': isConfigured,
+        'maskedAccount': maskedAccount,
+        'updatedAt': data['updatedAt'],
+        // 확장 여지: 서버가 제공하는 요약치(총자산/보유/현금)를 추후 포함
+      };
+
+      print('✅ [UseCase] 계좌(서버) 요약 로드 완료: '+result.toString());
+      return AccountDataLoadedChange(result);
     } catch (e) {
-      print('❌ [UseCase] 계좌 데이터 로드 실패: $e');
-      print('❌ [UseCase] 오류 타입: ${e.runtimeType}');
-      
-      return AccountDataLoadFailedChange('계좌 정보를 불러올 수 없습니다: $e', 1);
+      print('❌ [UseCase] 계좌(서버) 데이터 로드 실패: '+e.toString());
+      return AccountDataLoadFailedChange('계좌 정보를 불러올 수 없습니다: '+e.toString(), 1);
     }
   }
   

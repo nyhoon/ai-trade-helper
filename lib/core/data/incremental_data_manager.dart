@@ -154,14 +154,29 @@ class IncrementalDataManager {
         final chartData = await _unifiedApiService!.getDomesticDailyChart(stockCode: stockCode, count: 100);
         
         if (chartData.isNotEmpty) {
-          // 4. DB에 저장 (통일된 방식 사용)
-          final bars = chartData.map((e) => {
-            'date': (e['date'] ?? '').toString().replaceAll('-', ''),
-            'open': (e['open'] ?? 0.0).toDouble(),
-            'high': (e['high'] ?? 0.0).toDouble(),
-            'low': (e['low'] ?? 0.0).toDouble(),
-            'close': (e['close'] ?? 0.0).toDouble(),
-            'volume': (e['volume'] ?? 0).toInt(),
+          print('📊 $stockCode 초기 데이터 로딩: ${chartData.length}개 데이터');
+          
+          // API 응답 데이터 상세 로깅
+          for (int i = 0; i < chartData.length; i++) {
+            final item = chartData[i];
+            print('  [$i] 날짜: ${item['date']}, 거래량: ${item['volume']}, 종가: ${item['close']}');
+          }
+          
+          // 4. DB에 저장 (개선된 날짜 변환 로직 사용)
+          final bars = chartData.map((e) {
+            final originalDate = e['date']?.toString() ?? '';
+            final formattedDate = _formatDateForStorage(originalDate);
+            
+            print('  - 원본 날짜: $originalDate → 변환된 날짜: $formattedDate');
+            
+            return {
+              'date': formattedDate,
+              'open': (e['open'] ?? 0.0).toDouble(),
+              'high': (e['high'] ?? 0.0).toDouble(),
+              'low': (e['low'] ?? 0.0).toDouble(),
+              'close': (e['close'] ?? 0.0).toDouble(),
+              'volume': (e['volume'] ?? 0).toInt(),
+            };
           }).toList();
 
           await _historicalDataRepo.upsertDailyBars(
@@ -178,7 +193,7 @@ class IncrementalDataManager {
     }
   }
 
-  /// 특정 종목의 증분 데이터 업데이트 (3-4일)
+  /// 특정 종목의 증분 데이터 업데이트 (7일 범위로 확장)
   Future<void> _updateStockIncrementalData(String stockCode, String market) async {
     try {
       // 1. 최신 날짜 확인
@@ -189,33 +204,53 @@ class IncrementalDataManager {
         return;
       }
 
-      // 2. 최신 날짜로부터 4일 전까지 업데이트
+      // 2. 최신 날짜로부터 7일 전까지 업데이트 (4일 → 7일로 확장)
       final latestDateTime = DateFormat('yyyy-MM-dd').parse(latestDate);
       final updateStartDate = DateFormat('yyyy-MM-dd').format(
-        latestDateTime.subtract(const Duration(days: 4))
+        latestDateTime.subtract(const Duration(days: 7)) // 4 → 7로 변경
       );
       final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
 
-      // 3. API에서 최신 데이터 조회
+      print('📊 $stockCode 증분 업데이트: $updateStartDate ~ $today (최신: $latestDate)');
+
+      // 3. API에서 최신 데이터 조회 (count를 늘려서 충분한 데이터 확보)
       if (_unifiedApiService != null) {
         // @api/ 확장 파일의 메서드 사용
-        final chartData = await _unifiedApiService!.getDomesticDailyChart(stockCode: stockCode, count: 10);
+        final chartData = await _unifiedApiService!.getDomesticDailyChart(stockCode: stockCode, count: 20); // 10 → 20으로 증가
         
         if (chartData.isNotEmpty) {
+          print('📊 $stockCode API 응답: ${chartData.length}개 데이터');
+          
+          // API 응답 데이터 상세 로깅
+          for (int i = 0; i < chartData.length; i++) {
+            final item = chartData[i];
+            print('  [$i] 날짜: ${item['date']}, 거래량: ${item['volume']}, 종가: ${item['close']}');
+          }
+          
           // 4. 최신 데이터만 필터링하여 저장 (통일된 방식 사용)
           final newData = chartData.where((data) {
             final dataDate = data['date'] ?? '';
             return dataDate.compareTo(updateStartDate) >= 0;
           }).toList();
 
+          print('📊 $stockCode 필터링 후: ${newData.length}개 신규 데이터');
+
           if (newData.isNotEmpty) {
-            final bars = newData.map((e) => {
-              'date': (e['date'] ?? '').toString().replaceAll('-', ''),
-              'open': (e['open'] ?? 0.0).toDouble(),
-              'high': (e['high'] ?? 0.0).toDouble(),
-              'low': (e['low'] ?? 0.0).toDouble(),
-              'close': (e['close'] ?? 0.0).toDouble(),
-              'volume': (e['volume'] ?? 0).toInt(),
+            // 개선된 날짜 변환 로직
+            final bars = newData.map((e) {
+              final originalDate = e['date']?.toString() ?? '';
+              final formattedDate = _formatDateForStorage(originalDate);
+              
+              print('  - 원본 날짜: $originalDate → 변환된 날짜: $formattedDate');
+              
+              return {
+                'date': formattedDate,
+                'open': (e['open'] ?? 0.0).toDouble(),
+                'high': (e['high'] ?? 0.0).toDouble(),
+                'low': (e['low'] ?? 0.0).toDouble(),
+                'close': (e['close'] ?? 0.0).toDouble(),
+                'volume': (e['volume'] ?? 0).toInt(),
+              };
             }).toList();
 
             await _historicalDataRepo.upsertDailyBars(
@@ -225,11 +260,39 @@ class IncrementalDataManager {
               keepDays: 100,
             );
             print('📈 $stockCode: ${bars.length}일 증분 업데이트 완료');
+          } else {
+            print('⚠️ $stockCode: 신규 데이터 없음 (이미 최신 상태)');
           }
         }
       }
     } catch (e) {
       print('⚠️ $stockCode 증분 업데이트 실패: $e');
+    }
+  }
+
+  /// 개선된 날짜 변환 로직
+  String _formatDateForStorage(dynamic dateValue) {
+    if (dateValue == null) return '';
+    
+    String dateStr = dateValue.toString();
+    
+    // 이미 yyyyMMdd 형식인 경우
+    if (dateStr.length == 8 && RegExp(r'^\d{8}$').hasMatch(dateStr)) {
+      return dateStr;
+    }
+    
+    // yyyy-MM-dd 형식인 경우
+    if (dateStr.contains('-')) {
+      return dateStr.replaceAll('-', '');
+    }
+    
+    // 다른 형식인 경우 DateTime으로 파싱 시도
+    try {
+      final date = DateTime.parse(dateStr);
+      return '${date.year}${date.month.toString().padLeft(2, '0')}${date.day.toString().padLeft(2, '0')}';
+    } catch (e) {
+      print('❌ 날짜 파싱 실패: $dateStr - $e');
+      return '';
     }
   }
 
