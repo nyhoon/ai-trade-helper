@@ -22,8 +22,15 @@ class AnalysisReasonUtils {
       return indicatorAnalysis['analysis'] as String;
     }
 
-    final currentPrice = (analysis['currentPrice'] as num?)?.toDouble() ?? 0.0;
-    final prevClose = (analysis['prevClose'] as num?)?.toDouble() ?? currentPrice;
+    // ✅ current 필드에서 현재가 가져오기
+    final current = analysis['current'] as Map<String, dynamic>?;
+    final currentPrice = (current?['currentPrice'] as num?)?.toDouble() ?? 0.0;
+    final prevClose = (current?['prevClose'] as num?)?.toDouble() ?? currentPrice;
+    
+    // 🔍 currentPrice 디버깅 로그
+    print('🔍 [analysis_reason_utils] current: $current');
+    print('🔍 [analysis_reason_utils] currentPrice: $currentPrice');
+    print('🔍 [analysis_reason_utils] prevClose: $prevClose');
     final technicalData = analysis['technicalData'] as Map<String, dynamic>? ?? {};
     final priceChangePercent = prevClose > 0 ? ((currentPrice - prevClose) / prevClose) * 100 : 0.0;
     final koreanName = getKoreanIndicatorName(indicatorName);
@@ -72,15 +79,15 @@ class AnalysisReasonUtils {
         final bandWidth = upper - lower;
         final position = bandWidth > 0 ? ((currentPrice - lower) / bandWidth) * 100 : 50.0;
         if (signal == '매수') {
-          if (currentPrice <= lower) return '현재가 ${formatNumber(currentPrice)}이 하단 지지선 ${formatNumber(lower)}에 닿아 반등 기대 - 매수 기회';
-          if (position <= 30) return '현재가 ${formatNumber(currentPrice)}이 하단 근처 (${position.toStringAsFixed(0)}% 위치) - 저점 매수 기회';
-          if (currentPrice >= middle) return '현재가 ${formatNumber(currentPrice)}이 중간선 ${formatNumber(middle)} 위로 상승 중 - 매수 신호';
+          if (currentPrice <= lower) return '현재가 ${formatNumber(currentPrice)}이 하단 지지선 ${formatNumber(lower)}에 닿아 반등 기대 (상단: ${formatNumber(upper)}, 중단: ${formatNumber(middle)}, 하단: ${formatNumber(lower)}) - 매수 기회';
+          if (position <= 30) return '현재가 ${formatNumber(currentPrice)}이 하단 근처 (${position.toStringAsFixed(0)}% 위치) (상단: ${formatNumber(upper)}, 중단: ${formatNumber(middle)}, 하단: ${formatNumber(lower)}) - 저점 매수 기회';
+          if (currentPrice >= middle) return '현재가 ${formatNumber(currentPrice)}이 중간선 ${formatNumber(middle)} 위로 상승 중 (상단: ${formatNumber(upper)}, 중단: ${formatNumber(middle)}, 하단: ${formatNumber(lower)}) - 매수 신호';
         } else if (signal == '매도') {
-          if (currentPrice >= upper) return '현재가 ${formatNumber(currentPrice)}이 상단 저항선 ${formatNumber(upper)}에 닿아 하락 예상 - 매도 권장';
-          if (position >= 70) return '현재가 ${formatNumber(currentPrice)}이 상단 근처 (${position.toStringAsFixed(0)}% 위치) - 고점 매도 기회';
-          if (currentPrice <= middle) return '현재가 ${formatNumber(currentPrice)}이 중간선 ${formatNumber(middle)} 아래로 하락 중 - 매도 신호';
+          if (currentPrice >= upper) return '현재가 ${formatNumber(currentPrice)}이 상단 저항선 ${formatNumber(upper)}에 닿아 하락 예상 (상단: ${formatNumber(upper)}, 중단: ${formatNumber(middle)}, 하단: ${formatNumber(lower)}) - 매도 권장';
+          if (position >= 70) return '현재가 ${formatNumber(currentPrice)}이 상단 근처 (${position.toStringAsFixed(0)}% 위치) (상단: ${formatNumber(upper)}, 중단: ${formatNumber(middle)}, 하단: ${formatNumber(lower)}) - 고점 매도 기회';
+          if (currentPrice <= middle) return '현재가 ${formatNumber(currentPrice)}이 중간선 ${formatNumber(middle)} 아래로 하락 중 (상단: ${formatNumber(upper)}, 중단: ${formatNumber(middle)}, 하단: ${formatNumber(lower)}) - 매도 신호';
         }
-        return '현재가 ${formatNumber(currentPrice)}이 중간선 ${formatNumber(middle)} 근처 (${position.toStringAsFixed(0)}% 위치) - 관망';
+        return '현재가 ${formatNumber(currentPrice)}이 중간선 ${formatNumber(middle)} 근처 (${position.toStringAsFixed(0)}% 위치) (상단: ${formatNumber(upper)}, 중단: ${formatNumber(middle)}, 하단: ${formatNumber(lower)}) - 관망';
 
       case 'movingaverage':
       case '이동평균선':
@@ -89,11 +96,11 @@ class AnalysisReasonUtils {
         final ma60 = (technicalData['ma60'] as num?)?.toDouble();
         if (ma5 == null || ma20 == null || ma60 == null) return '이동평균선 데이터 부족 - 관망 권장';
         if (signal == '매수') {
-          if (currentPrice >= ma5 && currentPrice >= ma20) return '현재가 ${formatNumber(currentPrice)}이 모든 이동평균선 위 (MA5: ${formatNumber(ma5)}, MA20: ${formatNumber(ma20)}) - 강한 상승 추세, 매수 기회';
+          if (currentPrice >= ma5 && currentPrice >= ma20 && currentPrice >= ma60) return '현재가 ${formatNumber(currentPrice)}이 모든 이동평균선 위 (MA5: ${formatNumber(ma5)}, MA20: ${formatNumber(ma20)}, MA60: ${formatNumber(ma60)}) - 강한 상승 추세, 매수 기회';
           if (currentPrice >= ma20) return '현재가 ${formatNumber(currentPrice)}이 20일 평균선 ${formatNumber(ma20)} 위로 돌파 - 상승 신호';
           if (ma5 >= ma20) return '단기 평균선 ${formatNumber(ma5)}이 장기 평균선 ${formatNumber(ma20)} 위로 상승 - 매수 신호';
         } else if (signal == '매도') {
-          if (currentPrice <= ma5 && currentPrice <= ma20) return '현재가 ${formatNumber(currentPrice)}이 모든 이동평균선 아래 (MA5: ${formatNumber(ma5)}, MA20: ${formatNumber(ma20)}) - 강한 하락 추세, 매도 권장';
+          if (currentPrice <= ma5 && currentPrice <= ma20 && currentPrice <= ma60) return '현재가 ${formatNumber(currentPrice)}이 모든 이동평균선 아래 (MA5: ${formatNumber(ma5)}, MA20: ${formatNumber(ma20)}, MA60: ${formatNumber(ma60)}) - 강한 하락 추세, 매도 권장';
           if (currentPrice <= ma20) return '현재가 ${formatNumber(currentPrice)}이 20일 평균선 ${formatNumber(ma20)} 아래로 하락 - 매도 신호';
           if (ma5 <= ma20) return '단기 평균선 ${formatNumber(ma5)}이 장기 평균선 ${formatNumber(ma20)} 아래로 하락 - 매도 신호';
         }
@@ -106,22 +113,32 @@ class AnalysisReasonUtils {
         if (currentVolume == null || avgVolume == null || avgVolume == 0) return '거래량 데이터 부족 - 관망 권장';
         final volumeRatio = currentVolume / avgVolume;
         if (signal == '매수') {
-          if (volumeRatio >= 2.0) return '거래량이 평균의 ${volumeRatio.toStringAsFixed(1)}배로 급증 (${formatNumber(currentVolume)}주) - 강한 매수 신호';
-          if (volumeRatio >= 1.5) return '거래량이 평균의 ${volumeRatio.toStringAsFixed(1)}배로 증가 (${formatNumber(currentVolume)}주) - 매수 신호';
-          if (volumeRatio >= 1.2 && priceChangePercent > 0) return '거래량 ${formatNumber(currentVolume)}주로 가격 상승 동반 - 매수 신호';
-          if (priceChangePercent > 0) return '거래량 ${formatNumber(currentVolume)}주로 상승 추세 - 매수 고려';
+          if (volumeRatio >= 2.0) return '거래량이 20일 평균 ${formatNumber(avgVolume)}주의 ${volumeRatio.toStringAsFixed(1)}배로 급증 (${formatNumber(currentVolume)}주) - 강한 매수 신호';
+          if (volumeRatio >= 1.5) return '거래량이 20일 평균 ${formatNumber(avgVolume)}주의 ${volumeRatio.toStringAsFixed(1)}배로 증가 (${formatNumber(currentVolume)}주) - 매수 신호';
+          if (volumeRatio >= 1.2 && priceChangePercent > 0) return '거래량 ${formatNumber(currentVolume)}주로 가격 상승 동반 (20일 평균 ${formatNumber(avgVolume)}주) - 매수 신호';
+          if (priceChangePercent > 0) return '거래량 ${formatNumber(currentVolume)}주로 상승 추세 (20일 평균 ${formatNumber(avgVolume)}주) - 매수 고려';
         } else if (signal == '매도') {
-          if (volumeRatio >= 2.0) return '거래량이 평균의 ${volumeRatio.toStringAsFixed(1)}배로 급증 (${formatNumber(currentVolume)}주) - 강한 매도 신호';
-          if (volumeRatio >= 1.5) return '거래량이 평균의 ${volumeRatio.toStringAsFixed(1)}배로 증가 (${formatNumber(currentVolume)}주) - 매도 신호';
-          if (volumeRatio >= 1.2 && priceChangePercent < 0) return '거래량 ${formatNumber(currentVolume)}주로 가격 하락 동반 - 매도 신호';
-          if (priceChangePercent < 0) return '거래량 ${formatNumber(currentVolume)}주로 하락 추세 - 매도 고려';
+          if (volumeRatio >= 2.0) return '거래량이 20일 평균 ${formatNumber(avgVolume)}주의 ${volumeRatio.toStringAsFixed(1)}배로 급증 (${formatNumber(currentVolume)}주) - 강한 매도 신호';
+          if (volumeRatio >= 1.5) return '거래량이 20일 평균 ${formatNumber(avgVolume)}주의 ${volumeRatio.toStringAsFixed(1)}배로 증가 (${formatNumber(currentVolume)}주) - 매도 신호';
+          if (volumeRatio >= 1.2 && priceChangePercent < 0) return '거래량 ${formatNumber(currentVolume)}주로 가격 하락 동반 (20일 평균 ${formatNumber(avgVolume)}주) - 매도 신호';
+          if (priceChangePercent < 0) return '거래량 ${formatNumber(currentVolume)}주로 하락 추세 (20일 평균 ${formatNumber(avgVolume)}주) - 매도 고려';
         }
-        return '거래량 ${formatNumber(currentVolume)}주 (평균의 ${volumeRatio.toStringAsFixed(1)}배) - 관망';
+        return '거래량 ${formatNumber(currentVolume)}주 (20일 평균 ${formatNumber(avgVolume)}주의 ${volumeRatio.toStringAsFixed(1)}배) - 관망';
 
       case 'vwap':
         final vwapValue = (technicalData['vwap'] as num?)?.toDouble();
         if (vwapValue == null || vwapValue == 0) return 'VWAP 데이터 부족 - 관망 권장';
-        final vwapDiff = currentPrice > 0 ? ((currentPrice - vwapValue) / vwapValue) * 100 : 0.0;
+        
+        // 🔍 VWAP 디버깅 로그
+        print('🔍 [VWAP reason 디버그] currentPrice: $currentPrice');
+        print('🔍 [VWAP reason 디버그] vwapValue: $vwapValue');
+        
+        // 현재가가 0이면 VWAP 분석 불가
+        if (currentPrice == 0 || currentPrice == null) {
+          return '현재가 데이터 부족 - VWAP 분석 불가 (VWAP: ${formatNumber(vwapValue)}) - 관망 권장';
+        }
+        
+        final vwapDiff = ((currentPrice - vwapValue) / vwapValue) * 100;
         if (signal == '매수') {
           if (vwapDiff <= -2.0) return '현재가 ${formatNumber(currentPrice)}이 평균가격 ${formatNumber(vwapValue)}보다 ${vwapDiff.abs().toStringAsFixed(1)}% 낮음 - 저점 매수 기회';
           if (vwapDiff <= -1.0) return '현재가 ${formatNumber(currentPrice)}이 평균가격 ${formatNumber(vwapValue)}보다 ${vwapDiff.abs().toStringAsFixed(1)}% 낮음 - 반등 기대';
@@ -214,6 +231,7 @@ class AnalysisReasonUtils {
 
     return reasons.join(' ');
   }
+
 
   static String getActualValueText({
     required String indicatorName,

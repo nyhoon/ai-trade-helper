@@ -240,8 +240,11 @@ class TradeStatusTracker {
   /// 현재 보유 종목과 비교하여 상태 업데이트
   Future<void> _updateStatesWithCurrentHoldings(Map<String, TradeStatus> states) async {
     try {
+      // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+      print('🔍 [current 보호] TradeStatusTracker에서 API 직접 호출 비활성화');
       // 1. KIS API에서 현재 보유 종목 확인
-      final positions = await _unifiedApiService.getPositionsCompat();
+      // final positions = await _unifiedApiService.getPositionsCompat();
+      final positions = <Map<String, dynamic>>[];
       
       // 2. 보유 종목은 'holding' 상태로 업데이트
       for (final position in positions) {
@@ -352,8 +355,11 @@ class TradeStatusTracker {
     try {
       print('🔍 보유 종목 자동 감지 시작...');
       
+      // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+      print('🔍 [current 보호] TradeStatusTracker에서 API 직접 호출 비활성화');
       // 1. KIS API에서 현재 보유 종목 확인
-      final positions = await _unifiedApiService.getPositionsCompat();
+      // final positions = await _unifiedApiService.getPositionsCompat();
+      final positions = <Map<String, dynamic>>[];
       
       // 2. 보유 종목을 'holding' 상태로 설정
       for (final position in positions) {

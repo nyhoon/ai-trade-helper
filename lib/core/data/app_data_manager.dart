@@ -619,6 +619,11 @@ class AppDataManager {
           _backfillHistoricalBars([stockCode], days: 100).catchError((e) {
             print('⚠️ 히스토리 백필 실패: $stockCode - $e');
           }),
+          
+          // 🔧 Firebase Functions 호출로 차트데이터 생성 보장
+          _backfillChartsServer([stockCode], days: 100).catchError((e) {
+            print('⚠️ 서버 차트 생성 실패: $stockCode - $e');
+          }),
         ]);
         
         print('📊 관심종목 백그라운드 작업 완료: $stockCode');

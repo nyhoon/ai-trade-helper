@@ -53,14 +53,17 @@ class AutoTrader {
     final sizing = risk.sizePosition(entryPrice: entry, atr: entry * 0.02); // 2% 변동성 가정
     if (sizing.quantity <= 0) return;
 
+    // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+    print('🔍 [current 보호] AutoTrader에서 API 직접 호출 비활성화');
     final side = decision.signal == TradeSignalType.buy ? 'buy' : 'sell';
-    final res = await kis.executeOrderWithConfirmation(
-      stockCode: stockCode,
-      orderType: side,
-      quantity: sizing.quantity,
-      price: entry,
-      confirmationTimeout: const Duration(minutes: 5),
-    );
+    // final res = await kis.executeOrderWithConfirmation(
+    //   stockCode: stockCode,
+    //   orderType: side,
+    //   quantity: sizing.quantity,
+    //   price: entry,
+    //   confirmationTimeout: const Duration(minutes: 5),
+    // );
+    final res = <String, dynamic>{'orderStatus': 'DISABLED'};
 
     final status = res['orderStatus'] == 'EXECUTED' ? 'success' : 'failed';
     // 텔레그램 전송: 초기화 예외는 무시

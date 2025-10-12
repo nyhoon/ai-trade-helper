@@ -120,19 +120,10 @@ class RealtimeUIManager {
   //   ); // Removed as per edit hint
   // } // Removed as per edit hint
 
-  /// 주기적 업데이트 시작 (사일런트)
+  /// 주기적 업데이트 시작 (Firestore 구독으로 대체)
   void _startPeriodicUpdates() {
-    _updateTimer?.cancel();
-    _updateTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
-      try {
-        _isSilentRefresh = true;
-        await _refreshAllDataSilent();
-        _isSilentRefresh = false;
-      } catch (e) {
-        print('❌ 주기적 데이터 업데이트 실패: $e');
-        _isSilentRefresh = false;
-      }
-    });
+    // Firestore 구독으로 대체되므로 주기적 API 호출 비활성화
+    print('🔄 주기적 업데이트 비활성화 - Firestore 구독 사용');
   }
 
   /// 초기 데이터 로드

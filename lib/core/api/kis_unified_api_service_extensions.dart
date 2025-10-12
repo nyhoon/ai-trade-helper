@@ -22,8 +22,11 @@ extension KisUnifiedApiServiceExtensions on KisUnifiedApiService {
   /// - 국내주식: 6자리 숫자 (예: 005930)
   /// - 해외주식: 1-5자리 영문 (예: AAPL, TSLA)
   Future<Map<String, dynamic>?> getStockPriceAuto(String stockCode) async {
-    // 서버 전환: 클라이언트에서 통일API 호출 금지
+    // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+    print('🔍 [current 보호] KisUnifiedApiServiceExtensions에서 API 직접 호출 비활성화');
     return null;
+    // 서버 전환: 클라이언트에서 통일API 호출 금지
+    // return null;
   }
   
   /// 종목 코드 자동 판별 및 차트 조회
@@ -454,7 +457,10 @@ extension KisUnifiedApiServiceExtensions on KisUnifiedApiService {
   /// 국내주식 현재가 조회 (호환성)
   Future<Map<String, dynamic>?> getDomesticCurrentPrice(String stockCode) async {
     try {
-      final priceData = await getStockPrice(stockCode);
+      // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+      print('🔍 [current 보호] KisUnifiedApiServiceExtensions에서 API 직접 호출 비활성화');
+      // final priceData = await getStockPrice(stockCode);
+      final priceData = null;
       if (priceData != null) {
         return {
           'prpr': priceData['prpr'],
@@ -473,10 +479,13 @@ extension KisUnifiedApiServiceExtensions on KisUnifiedApiService {
   /// 해외주식 현재가 조회 (호환성)
   Future<Map<String, dynamic>?> getOverseasCurrentPrice(String symbol) async {
     try {
-      final priceData = await getOverseasStockPrice(
-        symbol: symbol,
-        exchangeCode: 'NAS',
-      );
+      // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+      print('🔍 [current 보호] KisUnifiedApiServiceExtensions에서 API 직접 호출 비활성화');
+      // final priceData = await getOverseasStockPrice(
+      //   symbol: symbol,
+      //   exchangeCode: 'NAS',
+      // );
+      final priceData = null;
       if (priceData != null) {
         return {
           'prpr': priceData['prpr'],
@@ -568,11 +577,13 @@ extension KisUnifiedApiServiceExtensions on KisUnifiedApiService {
         // 해외주식은 심볼 그대로 반환
         return stockCode;
       } else {
+        // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+        print('🔍 [current 보호] KisUnifiedApiServiceExtensions에서 API 직접 호출 비활성화');
         // 국내주식은 현재가 조회에서 종목명 추출
-        final priceData = await getStockPrice(stockCode);
-        if (priceData != null && priceData['stockName'] != null) {
-          return priceData['stockName'] as String;
-        }
+        // final priceData = await getStockPrice(stockCode);
+        // if (priceData != null && priceData['stockName'] != null) {
+        //   return priceData['stockName'] as String;
+        // }
         return stockCode; // 기본값으로 종목코드 반환
       }
     } catch (e) {
@@ -591,12 +602,15 @@ extension KisUnifiedApiServiceExtensions on KisUnifiedApiService {
     try {
       print('📈 [확장API] 종목 상세 정보 조회: $stockCode');
       
+      // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+      print('🔍 [current 보호] KisUnifiedApiServiceExtensions에서 API 직접 호출 비활성화');
       // 1. 현재가 조회
-      final currentPrice = await getStockPriceAuto(stockCode);
-      if (currentPrice == null) {
-        print('❌ [확장API] 현재가 조회 실패: $stockCode');
-        return null;
-      }
+      // final currentPrice = await getStockPriceAuto(stockCode);
+      // if (currentPrice == null) {
+      //   print('❌ [확장API] 현재가 조회 실패: $stockCode');
+      //   return null;
+      // }
+      final currentPrice = null;
       
       // 2. 차트 데이터 조회
       final chartData = await getChartDataAuto(
@@ -682,7 +696,10 @@ extension KisUnifiedApiServiceExtensions on KisUnifiedApiService {
       for (final holding in domesticHoldings) {
         final stockCode = holding['pdno'] ?? '';
         if (stockCode.isNotEmpty) {
-          final currentPrice = await getStockPrice(stockCode);
+          // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+          print('🔍 [current 보호] KisUnifiedApiServiceExtensions에서 API 직접 호출 비활성화');
+          // final currentPrice = await getStockPrice(stockCode);
+          final currentPrice = null;
           if (currentPrice != null) {
             monitoringData.add({
               'stockCode': stockCode,
@@ -699,10 +716,13 @@ extension KisUnifiedApiServiceExtensions on KisUnifiedApiService {
       for (final holding in overseasHoldings) {
         final stockCode = holding['pdno'] ?? '';
         if (stockCode.isNotEmpty) {
-          final currentPrice = await getOverseasStockPrice(
-            symbol: stockCode,
-            exchangeCode: 'NAS',
-          );
+          // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+          print('🔍 [current 보호] KisUnifiedApiServiceExtensions에서 API 직접 호출 비활성화');
+          // final currentPrice = await getOverseasStockPrice(
+          //   symbol: stockCode,
+          //   exchangeCode: 'NAS',
+          // );
+          final currentPrice = null;
           if (currentPrice != null) {
             monitoringData.add({
               'stockCode': stockCode,

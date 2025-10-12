@@ -4,8 +4,9 @@ import '../data/app_data_manager.dart';
 import '../analysis/unified_analysis_service.dart';
 import '../trading/investment_style_manager.dart';
 import '../trading/investment_style.dart';
-import '../remote/remote_kis_service.dart';
+import '../api/unified_stock_service.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../data/firestore_stock_service.dart';
 
 // Events
 abstract class TradingEvent {}
@@ -137,38 +138,29 @@ class TradingBloc extends Bloc<TradingEvent, TradingState> {
     try {
       print('📊 TradingBloc: 종목 데이터 로드 시작 - $stockCode');
       
-      // 캐시된 데이터 우선 사용
+      // Firestore에서 직접 데이터 조회 (서버 저장된 데이터 사용)
+      final stockData = await FirestoreStockService.getStockData(stockCode);
+      if (stockData != null && stockData.isNotEmpty) {
+        final currentPrice = stockData['current'] as Map<String, dynamic>?;
+        if (currentPrice != null && currentPrice.isNotEmpty) {
+          print('📊 TradingBloc: Firestore 데이터 사용 - $stockCode');
+          // 표준 스키마로 정규화 후 반환
+          return _normalizePriceData(stockCode, currentPrice);
+        }
+      }
+      
+      // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+      print('📊 TradingBloc: 직접 API 호출 비활성화 - Firestore 구독 사용 - $stockCode');
+      
+      // 캐시된 데이터가 있으면 사용
       final cachedData = _appDataManager.getCachedStockData(stockCode);
       if (cachedData.isNotEmpty) {
         print('📊 TradingBloc: 캐시된 데이터 사용 - $stockCode');
-        // 표준 스키마로 정규화 후 반환 (int/double 안전 변환)
         return _normalizePriceData(stockCode, cachedData);
       }
       
-      print('📊 TradingBloc: API에서 데이터 조회(서버) - $stockCode');
-      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
-      await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
-      final stockPrice = await RemoteKisService.instance.getCurrentPrice(stockCode, uid: uid);
-      
-      if (stockPrice != null && stockPrice.isNotEmpty) {
-        print('📊 TradingBloc: API 데이터 조회 성공 - $stockCode');
-        print('  - 현재가: ${stockPrice['currentPrice']}');
-        print('  - 시가: ${stockPrice['open'] ?? stockPrice['openPrice']}');
-        print('  - 고가: ${stockPrice['high'] ?? stockPrice['highPrice']}');
-        print('  - 저가: ${stockPrice['low'] ?? stockPrice['lowPrice']}');
-        print('  - 거래량: ${stockPrice['volume']}');
-        
-        // 표준 스키마로 정규화 (UI가 기대하는 키 포함: currentPrice/prpr 등)
-        final normalized = _normalizePriceData(stockCode, stockPrice);
-        
-        // 캐시에 저장
-        _appDataManager.updateCurrentPrice(stockCode, normalized);
-        
-        return normalized;
-      } else {
-        print('⚠️ TradingBloc: API 데이터가 비어있음 - $stockCode');
-        return {};
-      }
+      print('⚠️ TradingBloc: 캐시된 데이터 없음 - $stockCode');
+      return {};
     } catch (e) {
       print('❌ TradingBloc: 종목 데이터 로드 실패 - $stockCode: $e');
       return {};
@@ -201,39 +193,11 @@ class TradingBloc extends Bloc<TradingEvent, TradingState> {
         }
       }
       
-      // 2. 서버 캐시 사용: ensure → currentPrice
-      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
-      await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
-      final priceData = await RemoteKisService.instance.getCurrentPrice(stockCode, uid: uid);
+      // 2. Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+      print('📊 TradingBloc: 사일런트 API 호출 비활성화 - Firestore 구독 사용 - $stockCode');
       
-      if (priceData != null && priceData.isNotEmpty) {
-        final normalized = _normalizePriceData(stockCode, priceData);
-        final newPrice = (normalized['currentPrice'] as num?)?.toDouble() ?? 0.0;
-        final currentNorm = _normalizePriceData(stockCode, currentData);
-        final currentPrice = (currentNorm['currentPrice'] as num?)?.toDouble() ?? 0.0;
-        
-        // 가격 또는 거래량이 변경된 경우에만 업데이트
-        final newVolume = (normalized['volume'] as num?)?.toDouble() ?? 0.0;
-        final currentVolume = (currentNorm['volume'] as num?)?.toDouble() ?? 0.0;
-        
-        final priceChanged = newPrice > 0 && (newPrice - currentPrice).abs() > 0.01;
-        final volumeChanged = newVolume > 0 && (newVolume - currentVolume).abs() > 0.01;
-        
-        if (priceChanged || volumeChanged) {
-          print('📊 TradingBloc: 서버 현재가로 업데이트 - $stockCode (가격: $priceChanged, 거래량: $volumeChanged)');
-          
-          // 캐시에 저장
-          _appDataManager.updateCurrentPrice(stockCode, normalized);
-          
-          return normalized;
-        } else {
-          print('📊 TradingBloc: 가격/거래량 변경 없음 - $stockCode');
-          return currentNorm; // 기존 데이터 유지(정규화)
-        }
-      } else {
-        print('⚠️ TradingBloc: 서버 현재가 없음 - $stockCode');
-        return _normalizePriceData(stockCode, currentData); // 기존 데이터 유지(정규화)
-      }
+      // 기존 데이터 유지
+      return _normalizePriceData(stockCode, currentData);
     } catch (e) {
       print('❌ TradingBloc: 사일런트 현재가 로드 실패 - $stockCode: $e');
       return _normalizePriceData(stockCode, currentData); // 에러 시 기존 데이터 유지(정규화)
@@ -266,21 +230,24 @@ class TradingBloc extends Bloc<TradingEvent, TradingState> {
   Map<String, dynamic> _normalizePriceData(String stockCode, Map<String, dynamic> raw) {
     try {
       if (raw.isEmpty) return {};
-      final cp = RemoteKisService.asDouble(raw['currentPrice'] ?? raw['prpr']);
-      final pc = RemoteKisService.asDouble(raw['prevClose'] ?? raw['stck_prdy_clpr']);
-      final op = RemoteKisService.asDouble(raw['open'] ?? raw['openPrice'] ?? raw['stck_oprc']);
-      final hp = RemoteKisService.asDouble(raw['high'] ?? raw['highPrice'] ?? raw['stck_hgpr']);
-      final lp = RemoteKisService.asDouble(raw['low'] ?? raw['lowPrice'] ?? raw['stck_lwpr']);
-      final vol = RemoteKisService.asInt(raw['volume'] ?? raw['acml_vol']);
+      double _asDouble(dynamic v) => v is num ? v.toDouble() : double.tryParse('$v') ?? 0.0;
+      int _asInt(dynamic v) => v is num ? v.toInt() : int.tryParse('$v') ?? 0;
+
+      final cp = _asDouble(raw['currentPrice'] ?? raw['prpr']);
+      final pc = _asDouble(raw['prevClose'] ?? raw['stck_prdy_clpr']);
+      final op = _asDouble(raw['open'] ?? raw['openPrice'] ?? raw['stck_oprc']);
+      final hp = _asDouble(raw['high'] ?? raw['highPrice'] ?? raw['stck_hgpr']);
+      final lp = _asDouble(raw['low'] ?? raw['lowPrice'] ?? raw['stck_lwpr']);
+      final vol = _asInt(raw['volume'] ?? raw['acml_vol']);
 
       // 변동액/변동률: 서버 응답(change_amount/change_rate) 우선 → 계산 폴백
-      double diff = RemoteKisService.asDouble(raw['diff']);
-      double rate = RemoteKisService.asDouble(raw['rate']);
+      double diff = _asDouble(raw['diff']);
+      double rate = _asDouble(raw['rate']);
       if (diff == 0.0 && raw.containsKey('changeAmount')) {
-        diff = RemoteKisService.asDouble(raw['changeAmount']);
+        diff = _asDouble(raw['changeAmount']);
       }
       if (rate == 0.0 && raw.containsKey('changeRate')) {
-        rate = RemoteKisService.asDouble(raw['changeRate']);
+        rate = _asDouble(raw['changeRate']);
       }
       if ((diff == 0.0 || rate == 0.0) && pc > 0.0 && cp > 0.0) {
         final calculatedDiff = cp - pc;

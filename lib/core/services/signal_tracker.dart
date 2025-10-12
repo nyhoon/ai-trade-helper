@@ -224,7 +224,9 @@ class SignalTracker {
 
       // 3) 서버 캐시(가능할 때만)
       try {
-        final api = await RemoteKisService.instance.getCurrentPrice(stockCode);
+        // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+        print('📊 [SignalTracker] 현재가 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+        final api = null;
         if (api != null) {
           final apiNow = (api['currentPrice'] as num?)?.toDouble() ?? 0.0;
           final apiPrev = (api['prevClose'] as num?)?.toDouble() ?? 0.0;

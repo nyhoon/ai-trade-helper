@@ -208,7 +208,10 @@ class Backtester {
         }
       } else {
         print('🇰🇷 국내 종목 데이터 조회: $stockCode');
-        final chartData = await unifiedApiService.getDailyChart(stockCode, count: 100);
+        // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+        print('🔍 [current 보호] Backtester에서 API 직접 호출 비활성화');
+        // final chartData = await unifiedApiService.getDailyChart(stockCode, count: 100);
+        final chartData = <Map<String, dynamic>>[];
         if (chartData.isNotEmpty) {
           priceHistory = chartData.map((data) => data['close'] as double).toList();
           print('✅ 국내 데이터 조회 성공: ${priceHistory.length}개');

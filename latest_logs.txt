@@ -1,0 +1,7 @@
+﻿node.exe : error: unknown option '--limit'
+위치 C:\Users\getgn\AppData\Roaming\npm\firebase.ps1:24 문자:5
++     & "node$exe"  "$basedir/node_modules/firebase-tools/lib/bin/fireb ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: unknown option '--limit':String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

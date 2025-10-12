@@ -114,8 +114,11 @@ class AnalyzeSignalsUseCase {
 
   Future<double> _currentPrice(String stockCode) async {
     try {
-      final data = await KisUnifiedApiService().getStockPrice(stockCode);
-      return (data?['currentPrice'] as num?)?.toDouble() ?? 0.0;
+      // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+      print('🔍 [current 보호] AnalyzeSignalsUseCase에서 API 직접 호출 비활성화');
+      return 0.0;
+      // final data = await KisUnifiedApiService().getStockPrice(stockCode);
+      // return (data?['currentPrice'] as num?)?.toDouble() ?? 0.0;
     } catch (e) {
       print('❌ $stockCode 가격 조회 실패: $e');
       return 0.0;

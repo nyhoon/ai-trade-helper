@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../core/data/app_data_manager.dart';
 import '../../../core/trading/investment_style_manager.dart';
+import '../../../core/remote/remote_kis_service.dart';
 
 /// 주식 정보 헤더 위젯
 class StockInfoHeaderWidget extends StatelessWidget {
@@ -23,18 +25,208 @@ class StockInfoHeaderWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 디버그 로깅 추가
-    print('🔍 [StockInfoHeader] stockData: $stockData');
+    return StreamBuilder<DocumentSnapshot>(
+      stream: FirebaseFirestore.instance
+          .collection('stocks')
+          .doc(stockCode)
+          .snapshots(),
+      builder: (context, snapshot) {
+        print('🔍 [StockInfoHeader] StreamBuilder 상태: ${snapshot.connectionState}');
+        print('🔍 [StockInfoHeader] StreamBuilder 오류: ${snapshot.error}');
+        print('🔍 [StockInfoHeader] StreamBuilder 데이터 존재: ${snapshot.data != null}');
+        
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          print('⏳ [StockInfoHeader] Firestore 로딩 중...');
+          return _buildLoadingWidget();
+        }
+        
+        if (snapshot.hasError) {
+          print('❌ [StockInfoHeader] Firestore 구독 오류: ${snapshot.error}');
+          return _buildStockInfoWidget({}, stockData);
+        }
+        
+        final doc = snapshot.data;
+        Map<String, dynamic> firestoreData = {};
+        
+        if (doc != null && doc.exists) {
+          try {
+            final data = doc.data()! as Map<String, dynamic>;
+            print('🔍 [StockInfoHeader] Firestore 원본 데이터: $data');
+            print('🔍 [StockInfoHeader] Firestore 데이터 키들: ${data.keys.toList()}');
+            
+            // current 데이터 안전하게 처리
+            Map<String, dynamic>? current;
+            if (data['current'] != null) {
+              if (data['current'] is Map<String, dynamic>) {
+                current = data['current'] as Map<String, dynamic>;
+                print('🔍 [StockInfoHeader] current 데이터 추출 성공: $current');
+              } else {
+                print('⚠️ [StockInfoHeader] current 필드가 Map이 아님: ${data['current'].runtimeType}');
+              }
+            } else {
+              print('⚠️ [StockInfoHeader] current 필드가 null입니다');
+            }
+            
+                   // chart 데이터 안전하게 처리 (List 또는 Map 모두 지원)
+                   Map<String, dynamic>? chart;
+                   if (data['chart'] != null) {
+                     if (data['chart'] is Map<String, dynamic>) {
+                       chart = data['chart'] as Map<String, dynamic>;
+                       print('🔍 [StockInfoHeader] chart 데이터 추출 성공(Map): $chart');
+                     } else if (data['chart'] is List<dynamic>) {
+                       // List인 경우 첫 번째 요소(최신 데이터) 사용
+                       final chartList = data['chart'] as List<dynamic>;
+                       if (chartList.isNotEmpty) {
+                         chart = chartList.first as Map<String, dynamic>;
+                         print('🔍 [StockInfoHeader] chart 데이터 추출 성공(List 첫 번째): $chart');
+                         print('🔍 [StockInfoHeader] chart List 길이: ${chartList.length}');
+                         print('🔍 [StockInfoHeader] 최신 차트 날짜: ${chart['date']}');
+                       } else {
+                         print('⚠️ [StockInfoHeader] chart List가 비어있습니다');
+                       }
+                     } else {
+                       print('⚠️ [StockInfoHeader] chart 필드가 Map도 List도 아님: ${data['chart'].runtimeType}');
+                     }
+                   } else {
+                     print('⚠️ [StockInfoHeader] chart 필드가 null입니다');
+                   }
+            
+            // chart 데이터를 우선하고 current 데이터를 보조로 사용
+            firestoreData = {
+              ...?current,  // current 데이터 (기본)
+              ...?chart,    // chart 데이터 (우선) - 최신 거래량 등
+            };
+            
+            print('🔍 [StockInfoHeader] Firestore 구독 데이터: $firestoreData');
+            print('🔍 [StockInfoHeader] current 데이터: $current');
+            print('🔍 [StockInfoHeader] chart 데이터: $chart');
+          } catch (e) {
+            print('❌ [StockInfoHeader] Firestore 데이터 파싱 오류: $e');
+            firestoreData = {};
+          }
+        } else {
+          print('❌ [StockInfoHeader] Firestore 문서가 존재하지 않습니다: $stockCode');
+        }
+        
+        return _buildStockInfoWidget(firestoreData, stockData);
+      },
+    );
+  }
+  
+  Widget _buildLoadingWidget() {
+    return Container(
+      height: 120,
+      child: Center(
+        child: CircularProgressIndicator(),
+      ),
+    );
+  }
+  
+  Widget _buildStockInfoWidget(Map<String, dynamic> firestoreData, Map<String, dynamic> stockData) {
+    // 🔍 current 필드 안의 데이터를 읽어야 함
+    final currentData = stockData['current'] as Map<String, dynamic>? ?? {};
+    print('🔍 [StockInfoHeader] currentData: $currentData');
     
-    final currentPrice = _toDouble(stockData['prpr']) ?? 0.0;
-    final change = _toDouble(stockData['diff']) ?? 0.0;
-    final changeRate = _toDouble(stockData['rate']) ?? 0.0;
-    final openPrice = _toDouble(stockData['open']) ?? 0.0;
-    final highPrice = _toDouble(stockData['high']) ?? 0.0;
-    final lowPrice = _toDouble(stockData['low']) ?? 0.0;
-    // 거래량: 다중 소스 폴백 (API→캐시→차트)
-    // 개선된 거래량 데이터 조회 로직
-    double volume = _getCurrentVolume(stockCode, stockData);
+    // 🔍 Firestore 데이터 우선 사용 (chart 데이터 우선)
+    final currentPrice = _toDouble(firestoreData['currentPrice']) ?? 
+                         _toDouble(firestoreData['close']) ?? 
+                         _toDouble(currentData['currentPrice']) ?? 
+                         _toDouble(stockData['currentPrice']) ?? 
+                         _toDouble(stockData['prpr']) ?? 0.0;
+    
+    // 전일종가 계산 (chart의 close를 전일종가로 사용)
+    double prevClose = _toDouble(firestoreData['prevClose']) ?? 
+                       _toDouble(currentData['prevClose']) ?? 
+                       _toDouble(stockData['prevClose']) ?? 
+                       _toDouble(stockData['stck_prdy_clpr']) ?? 0.0;
+    
+    // prevClose가 0이면 chart의 close를 전일종가로 사용
+    if (prevClose == 0) {
+      prevClose = _toDouble(firestoreData['close']) ?? 0.0;
+      print('🔍 [StockInfoHeader] prevClose가 0이므로 chart close를 전일종가로 사용: $prevClose');
+    }
+    
+    print('🔍 [StockInfoHeader] 최종 현재가: $currentPrice');
+    print('🔍 [StockInfoHeader] 전일종가: $prevClose');
+    
+    // Functions에서 diff, rate 필드를 저장하지 않으므로 계산
+    final change = currentPrice - prevClose;
+    double finalChangeRate = 0.0;
+    
+    print('🔍 [StockInfoHeader] 등락률 계산 시작: $stockCode');
+    print('🔍 [StockInfoHeader] 현재가: $currentPrice, 전일종가: $prevClose, 변동: $change');
+    
+    // prevClose가 0이면 등락률 계산 불가
+    if (prevClose > 0) {
+      finalChangeRate = (change / prevClose) * 100.0;
+      print('✅ [StockInfoHeader] 등락률 계산 성공: ${finalChangeRate.toStringAsFixed(2)}%');
+    } else {
+      print('⚠️ [StockInfoHeader] 전일종가가 0이므로 등락률 계산 불가: $stockCode');
+      // 전일종가가 0이면 현재가를 기준으로 임시 계산 (정확하지 않음)
+      if (currentPrice > 0) {
+        finalChangeRate = 0.0; // 정확한 계산 불가
+        print('⚠️ [StockInfoHeader] 전일종가 없음 - 등락률을 0%로 설정');
+      }
+    }
+    
+    // 🔍 Firestore 데이터 우선 사용 (current + chart)
+    final openPrice = _toDouble(firestoreData['open']) ?? 
+                     _toDouble(currentData['open']) ?? 
+                     _toDouble(stockData['open']) ?? 
+                     _toDouble(stockData['openPrice']) ?? 
+                     _toDouble(stockData['stck_oprc']) ?? 0.0;
+    final highPrice = _toDouble(firestoreData['high']) ?? 
+                     _toDouble(currentData['high']) ?? 
+                     _toDouble(stockData['high']) ?? 
+                     _toDouble(stockData['highPrice']) ?? 
+                     _toDouble(stockData['stck_hgpr']) ?? 0.0;
+    final lowPrice = _toDouble(firestoreData['low']) ?? 
+                    _toDouble(currentData['low']) ?? 
+                    _toDouble(stockData['low']) ?? 
+                    _toDouble(stockData['lowPrice']) ?? 
+                    _toDouble(stockData['stck_lwpr']) ?? 0.0;
+    // 🔍 거래량 데이터 소스 우선순위: chart > current > stockData
+    double volume = 0.0;
+    
+    // 1순위: chart 데이터 (최신)
+    if (firestoreData['volume'] != null) {
+      volume = _toDouble(firestoreData['volume']);
+      print('🔍 [StockInfoHeader] chart 거래량 사용: $volume');
+    }
+    // 2순위: current 데이터
+    else if (currentData['volume'] != null) {
+      volume = _toDouble(currentData['volume']);
+      print('🔍 [StockInfoHeader] current 거래량 사용: $volume');
+    }
+    // 3순위: stockData (과거 데이터)
+    else {
+      volume = _toDouble(stockData['volume']) ?? 0.0;
+      print('⚠️ [StockInfoHeader] stockData 거래량 사용 (과거 데이터): $volume');
+    }
+    
+    print('🔍 [StockInfoHeader] 거래량 데이터 소스 확인:');
+    print('🔍 [StockInfoHeader] Firestore 거래량: ${firestoreData['volume']}');
+    print('🔍 [StockInfoHeader] currentData 거래량: ${currentData['volume']}');
+    print('🔍 [StockInfoHeader] stockData 거래량: ${stockData['volume']}');
+    print('🔍 [StockInfoHeader] 최종 거래량: $volume');
+    
+    // 거래량이 0이거나 과거 데이터면 Firestore Functions 호출 시도 (비동기, 빈도 제한)
+    if (volume == 0 || (stockData['volume'] != null && volume == _toDouble(stockData['volume']))) {
+      print('⚠️ [StockInfoHeader] 거래량이 0이거나 과거 데이터입니다. Firestore Functions 호출 시도...');
+      print('⚠️ [StockInfoHeader] 현재 거래량: $volume, stockData 거래량: ${stockData['volume']}');
+      RemoteKisService.instance.ensureChartAndAnalyze(
+        uid: 'debug-user',
+        symbol: stockCode,
+      ).then((success) {
+        if (success) {
+          print('✅ [StockInfoHeader] Firestore Functions 호출 완료: $stockCode');
+        } else {
+          print('⏸️ [StockInfoHeader] Firestore Functions 호출 건너뜀 (빈도 제한): $stockCode');
+        }
+      }).catchError((e) {
+        print('❌ [StockInfoHeader] Firestore Functions 호출 실패: $e');
+      });
+    }
     final market = (stockData['market']?.toString().toUpperCase() ?? '');
     final exchange = (stockData['exchange']?.toString().toUpperCase() ?? '');
     final bool isNasdaq = _isNasdaqStock(stockCode) || market == 'NASDAQ' || exchange == 'NAS';
@@ -53,6 +245,7 @@ class StockInfoHeaderWidget extends StatelessWidget {
     }
     
     print('🔍 [StockInfoHeader] 최종 현재가: $finalCurrentPrice');
+    print('🔍 [StockInfoHeader] 최종 거래량: $volume');
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -154,7 +347,7 @@ class StockInfoHeaderWidget extends StatelessWidget {
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
-                  '${change >= 0 ? '+' : ''}${isNasdaq ? _formatNumber(change, decimals: 2) : _formatNumber(change)} (${changeRate >= 0 ? '+' : ''}${changeRate.toStringAsFixed(2)}%)',
+                  '${change >= 0 ? '+' : ''}${isNasdaq ? _formatNumber(change, decimals: 2) : _formatNumber(change)} (${finalChangeRate >= 0 ? '+' : ''}${finalChangeRate.toStringAsFixed(2)}%)',
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,
@@ -169,8 +362,8 @@ class StockInfoHeaderWidget extends StatelessWidget {
           // 전일 종가
           Text(
             isNasdaq
-                ? '전일: \$${_formatNumber(_toDouble(stockData['stck_prdy_clpr']), decimals: 2)}'
-                : '전일: ${_formatNumber(_toDouble(stockData['stck_prdy_clpr']))}원',
+                ? '전일: \$${_formatNumber(_toDouble(stockData['prev_close']) ?? _toDouble(stockData['stck_prdy_clpr']), decimals: 2)}'
+                : '전일: ${_formatNumber(_toDouble(stockData['prev_close']) ?? _toDouble(stockData['stck_prdy_clpr']))}원',
             style: TextStyle(
               fontSize: 14,
               color: Colors.grey[600],
@@ -224,24 +417,37 @@ class StockInfoHeaderWidget extends StatelessWidget {
     );
   }
 
-  /// 개선된 거래량 데이터 조회 로직 (차트 데이터 우선)
-  double _getCurrentVolume(String stockCode, Map<String, dynamic> stockData) {
-    // 1. 통합된 데이터에서 거래량 확인 (이미 차트 데이터가 통합됨)
-    double volume = _toDouble(stockData['volume']) ?? 0.0;
+  /// 개선된 거래량 데이터 조회 로직 (종목별 정확한 데이터)
+  double _getCurrentVolume(String stockCode, Map<String, dynamic> currentData, Map<String, dynamic> stockData) {
+    print('🔍 [StockInfoHeader] 거래량 조회 시작: $stockCode');
     
-    if (volume <= 0) {
-      // 2. 캐시된 통합 데이터 확인
+    // 1. current 필드에서 우선 읽기 (Functions에서 저장하는 필드명)
+    double volume = _toDouble(currentData['volume']) ?? 
+                    _toDouble(stockData['volume']) ?? 
+                    _toDouble(stockData['tvol']) ?? 
+                    _toDouble(stockData['acml_vol']) ?? 0.0;
+    
+    if (volume > 0) {
+      print('🔍 [StockInfoHeader] 현재 데이터 거래량 사용: $volume (tvol/acml_vol/volume)');
+      return volume;
+    }
+    
+    // 2. 캐시된 데이터에서 해당 종목의 거래량 확인
       final cachedData = AppDataManager.instance.getCachedStockData(stockCode);
-      volume = _toDouble(cachedData['volume']) ?? 0.0;
+    volume = _toDouble(cachedData['tvol']) ?? 
+             _toDouble(cachedData['acml_vol']) ?? 
+             _toDouble(cachedData['volume']) ?? 0.0;
       
       if (volume > 0) {
-        print('🔍 [StockInfoHeader] 통합 데이터 거래량 사용: $volume');
-      } else {
-        // 3. 차트 데이터에서 최신 거래량 확인 (폴백)
+      print('🔍 [StockInfoHeader] 캐시 데이터 거래량 사용: $volume');
+      return volume;
+    }
+    
+    // 3. 차트 데이터에서 해당 종목의 최신 거래량 확인
         try {
           final cachedChart = AppDataManager.instance.getCachedChartData(stockCode);
           if (cachedChart.isNotEmpty) {
-            // 최신 거래일 데이터 확인
+        // 최신 거래일 데이터 확인 (오늘 우선, 없으면 최신)
             final today = DateTime.now();
             final todayStr = '${today.year}${today.month.toString().padLeft(2, '0')}${today.day.toString().padLeft(2, '0')}';
             
@@ -252,28 +458,22 @@ class StockInfoHeaderWidget extends StatelessWidget {
                 final chartVol = _toDouble(chartData['volume']);
                 if (chartVol > 0) {
                   volume = chartVol;
-                  print('🔍 [StockInfoHeader] 오늘 거래량 사용: $volume (날짜: $chartDate)');
-                  break;
+              print('🔍 [StockInfoHeader] 오늘 차트 거래량 사용: $volume (날짜: $chartDate)');
+              return volume;
                 }
               }
             }
             
             // 오늘 데이터가 없으면 최신 데이터 사용
-            if (volume <= 0) {
               final last = cachedChart.last;
               final chartVol = _toDouble(last['volume']);
               if (chartVol > 0) {
                 volume = chartVol;
                 print('🔍 [StockInfoHeader] 최신 거래량 사용: $volume');
-              }
             }
           }
         } catch (e) {
           print('❌ [StockInfoHeader] 거래량 조회 실패: $e');
-        }
-      }
-    } else {
-      print('🔍 [StockInfoHeader] 통합 데이터 거래량 사용: $volume');
     }
     
     return volume;

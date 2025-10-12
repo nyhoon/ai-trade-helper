@@ -1,6 +1,9 @@
 import 'package:ai_helper/core/api/kis_unified_api_service.dart';
 import 'package:ai_helper/core/remote/remote_kis_service.dart';
 import 'package:ai_helper/core/utils/stock_utils.dart';
+import 'package:ai_helper/core/trading/market_time_validator.dart';
+import 'package:ai_helper/core/data/firestore_stock_service.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 /// 통합 주식 서비스 - 해외/국내 통합 API 호출
 class UnifiedStockService {
@@ -11,30 +14,30 @@ class UnifiedStockService {
   final RemoteKisService _remoteKis = RemoteKisService.instance;
   final StockUtils _stockUtils = StockUtils.instance;
 
-  /// 통합 현재가 조회: 서버 Functions 우선, 클라이언트 KIS API 폴백
+  /// 통합 현재가 조회: 서버(Function) 보장 → Firestore 읽기(재시도)
   Future<Map<String, dynamic>?> getCurrentPrice(String symbol, {String? uid}) async {
     try {
       print('🔍 [UnifiedStockService] 통합 현재가 조회 시작: $symbol');
-      
-      // 1. 서버 Functions 시도
-      print('🌐 [UnifiedStockService] 서버 Functions 시도: $symbol');
-      final serverData = await _remoteKis.getCurrentPrice(symbol, uid: uid);
-      
-      if (serverData != null && serverData.isNotEmpty) {
-        print('✅ [UnifiedStockService] 서버 Functions 성공: $symbol');
-        return _normalizeServerData(serverData, symbol);
+      // 1) 서버에 데이터 보장 요청
+      final effectiveUid = uid ?? FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+      await _remoteKis.ensureChartAndAnalyze(uid: effectiveUid, symbol: symbol);
+
+      // 2) Firestore에서 재시도 읽기 (500ms * 8)
+      Map<String, dynamic>? current;
+      for (int i = 0; i < 8; i++) {
+        final doc = await FirestoreStockService.getStockData(symbol);
+        current = (doc != null ? doc['current'] as Map<String, dynamic>? : null);
+        final has = current != null && current.isNotEmpty && current['currentPrice'] != null;
+        if (has) break;
+        await Future.delayed(const Duration(milliseconds: 500));
       }
-      
-      // 2. 클라이언트 KIS API 폴백
-      print('🔄 [UnifiedStockService] 서버 실패 → 클라이언트 KIS API 폴백: $symbol');
-      final clientData = await _kisApi.getStockPriceAuto(symbol);
-      
-      if (clientData != null && clientData.isNotEmpty) {
-        print('✅ [UnifiedStockService] 클라이언트 KIS API 성공: $symbol');
-        return _normalizeClientData(clientData, symbol);
+
+      if (current != null && current.isNotEmpty) {
+        print('✅ [UnifiedStockService] Firestore 현재가 수신: $symbol');
+        return _normalizeServerData(current!, symbol);
       }
-      
-      print('❌ [UnifiedStockService] 모든 API 실패: $symbol');
+
+      print('❌ [UnifiedStockService] Firestore 현재가 없음: $symbol');
       return null;
       
     } catch (e) {
@@ -43,30 +46,31 @@ class UnifiedStockService {
     }
   }
 
-  /// 통합 일별 차트 조회: 서버 Functions 우선, 클라이언트 KIS API 폴백
+  /// 통합 일별 차트 조회: 서버(Function) 보장 → Firestore 읽기(재시도)
   Future<List<Map<String, dynamic>>> getDailyChart(String symbol, {int days = 100, String? uid}) async {
     try {
       print('🔍 [UnifiedStockService] 통합 일별 차트 조회 시작: $symbol');
-      
-      // 1. 서버 Functions 시도
-      print('🌐 [UnifiedStockService] 서버 Functions 시도: $symbol');
-      final serverData = await _remoteKis.getStockData(symbol, uid: uid);
-      
-      if (serverData.isNotEmpty) {
-        print('✅ [UnifiedStockService] 서버 Functions 성공: $symbol (${serverData.length}개)');
-        return _normalizeChartData(serverData, symbol);
+      // 1) 서버에 데이터 보장 요청
+      final effectiveUid = uid ?? FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+      await _remoteKis.ensureChartAndAnalyze(uid: effectiveUid, symbol: symbol);
+
+      // 2) Firestore에서 재시도 읽기 (500ms * 8)
+      List<Map<String, dynamic>> chart = [];
+      for (int i = 0; i < 8; i++) {
+        final bars = await FirestoreStockService.getChartData(symbol);
+        if (bars.isNotEmpty) {
+          chart = bars;
+          break;
+        }
+        await Future.delayed(const Duration(milliseconds: 500));
       }
-      
-      // 2. 클라이언트 KIS API 폴백
-      print('🔄 [UnifiedStockService] 서버 실패 → 클라이언트 KIS API 폴백: $symbol');
-      final clientData = await _getClientChartData(symbol, days);
-      
-      if (clientData.isNotEmpty) {
-        print('✅ [UnifiedStockService] 클라이언트 KIS API 성공: $symbol (${clientData.length}개)');
-        return _normalizeChartData(clientData, symbol);
+
+      if (chart.isNotEmpty) {
+        print('✅ [UnifiedStockService] Firestore 차트 수신: $symbol (${chart.length}개)');
+        return _normalizeChartData(chart, symbol);
       }
-      
-      print('❌ [UnifiedStockService] 모든 API 실패: $symbol');
+
+      print('❌ [UnifiedStockService] Firestore 차트 없음: $symbol');
       return [];
       
     } catch (e) {
@@ -77,7 +81,13 @@ class UnifiedStockService {
 
   /// 서버 데이터 정규화
   Map<String, dynamic> _normalizeServerData(Map<String, dynamic> data, String symbol) {
-    final bool isOverseas = _stockUtils.isOverseasStock(symbol);
+    String market;
+    try {
+      market = MarketTimeValidator.instance.getMarketFromSymbol(symbol);
+    } catch (_) {
+      market = _stockUtils.isOverseasStock(symbol) ? 'NASDAQ' : 'KOSPI';
+    }
+    final bool isOverseas = market.toUpperCase().contains('NAS');
     
     return {
       'currentPrice': data['currentPrice'] ?? data['current_price'] ?? 0.0,
@@ -89,15 +99,21 @@ class UnifiedStockService {
       'changeAmount': data['changeAmount'] ?? data['change_amount'] ?? 0.0,
       'changeRate': data['changeRate'] ?? data['change_rate'] ?? 0.0,
       'stockName': data['stockName'] ?? data['stock_name'] ?? symbol,
-      'market': isOverseas ? 'NASDAQ' : 'KOSPI',
+      'market': market,
       'timestamp': data['timestamp'] ?? DateTime.now().millisecondsSinceEpoch,
       'isOverseas': isOverseas,
     };
   }
 
-  /// 클라이언트 데이터 정규화
+  /// 클라이언트 데이터 정규화 (미사용 - 하위호환)
   Map<String, dynamic> _normalizeClientData(Map<String, dynamic> data, String symbol) {
-    final bool isOverseas = _stockUtils.isOverseasStock(symbol);
+    String market;
+    try {
+      market = MarketTimeValidator.instance.getMarketFromSymbol(symbol);
+    } catch (_) {
+      market = _stockUtils.isOverseasStock(symbol) ? 'NASDAQ' : 'KOSPI';
+    }
+    final bool isOverseas = market.toUpperCase().contains('NAS');
     
     return {
       'currentPrice': data['prpr'] ?? 0.0,
@@ -109,7 +125,7 @@ class UnifiedStockService {
       'changeAmount': data['diff'] ?? 0.0,
       'changeRate': data['rate'] ?? 0.0,
       'stockName': data['stockName'] ?? symbol,
-      'market': isOverseas ? 'NASDAQ' : 'KOSPI',
+      'market': market,
       'timestamp': DateTime.now().millisecondsSinceEpoch,
       'isOverseas': isOverseas,
     };
@@ -118,7 +134,13 @@ class UnifiedStockService {
   /// 클라이언트 차트 데이터 조회 (기존 KIS API 구조 반영)
   Future<List<Map<String, dynamic>>> _getClientChartData(String symbol, int days) async {
     try {
-      final bool isOverseas = _stockUtils.isOverseasStock(symbol);
+      String market;
+      try {
+        market = MarketTimeValidator.instance.getMarketFromSymbol(symbol);
+      } catch (_) {
+        market = _stockUtils.isOverseasStock(symbol) ? 'NASDAQ' : 'KOSPI';
+      }
+      final bool isOverseas = market.toUpperCase().contains('NAS');
       
       if (isOverseas) {
         // 해외주식: exchangeCode 'NAS' (나스닥)

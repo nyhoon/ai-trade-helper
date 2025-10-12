@@ -196,9 +196,7 @@ class IntegratedAnalysisSection extends StatelessWidget {
                     Row(children: [Icon(Icons.lightbulb_outline, size: 16, color: signalColor), const SizedBox(width: 6), Text('분석 이유', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: signalColor))]),
                     const SizedBox(height: 8),
                     Text(
-                      reason.isNotEmpty
-                          ? reason
-                          : generateComprehensiveAnalysisReason(analysis, finalSignal, comprehensiveScore, individualScores),
+                      _buildAnalysisReasonWithPriceChange(reason, analysis, finalSignal, comprehensiveScore, individualScores),
                       style: TextStyle(fontSize: 13, color: Colors.grey[700], height: 1.4),
                     ),
                   ],
@@ -223,7 +221,7 @@ class IntegratedAnalysisSection extends StatelessWidget {
                         case 'volume':
                           if (currentVolume > 0) {
                             final ratio = (avgVolume > 0) ? (currentVolume / (avgVolume == 0 ? 1 : avgVolume)) : 1.0;
-                            valueLine = '거래량 ${fmtVol(currentVolume)}주 (평균의 ${ratio.toStringAsFixed(1)}배)';
+                            valueLine = '거래량 ${fmtVol(currentVolume)}주 (20일 평균 ${fmtVol(avgVolume)}주의 ${ratio.toStringAsFixed(1)}배)';
                           }
                           break;
                         case 'rsi':
@@ -235,13 +233,38 @@ class IntegratedAnalysisSection extends StatelessWidget {
                           }
                           break;
                         case 'bollinger':
-                          if (bbMiddle != null) valueLine = '중간밴드 ${fmtPricePlain(bbMiddle)}${overseas ? '' : '원'}';
+                          if (bbUpper != null && bbMiddle != null && bbLower != null) {
+                            valueLine = '상단 ${fmtPricePlain(bbUpper)}${overseas ? '' : '원'} · 중단 ${fmtPricePlain(bbMiddle)}${overseas ? '' : '원'} · 하단 ${fmtPricePlain(bbLower)}${overseas ? '' : '원'}';
+                          } else if (bbMiddle != null) {
+                            valueLine = '중간밴드 ${fmtPricePlain(bbMiddle)}${overseas ? '' : '원'}';
+                          }
                           break;
                         case 'movingAverage':
-                          if (ma5 != null && ma20 != null) valueLine = 'MA5 ${fmtPricePlain(ma5)}${overseas ? '' : '원'} · MA20 ${fmtPricePlain(ma20)}${overseas ? '' : '원'}';
+                          if (ma5 != null && ma20 != null && ma60 != null) {
+                            valueLine = 'MA5 ${fmtPricePlain(ma5)}${overseas ? '' : '원'} · MA20 ${fmtPricePlain(ma20)}${overseas ? '' : '원'} · MA60 ${fmtPricePlain(ma60)}${overseas ? '' : '원'}';
+                          } else if (ma5 != null && ma20 != null) {
+                            valueLine = 'MA5 ${fmtPricePlain(ma5)}${overseas ? '' : '원'} · MA20 ${fmtPricePlain(ma20)}${overseas ? '' : '원'}';
+                          }
                           break;
                         case 'vwap':
-                          if (vwap != null) valueLine = 'VWAP ${fmtPricePlain(vwap)}${overseas ? '' : '원'}';
+                          if (vwap != null) {
+                            // ✅ current 필드에서 현재가 직접 가져오기
+                            final current = analysis['current'] as Map<String, dynamic>?;
+                            final currentPrice = current?['currentPrice'] as num?;
+                            
+                            // 🔍 VWAP 디버깅 로그
+                            print('🔍 [VWAP 디버그] analysis keys: ${analysis.keys.toList()}');
+                            print('🔍 [VWAP 디버그] current: $current');
+                            print('🔍 [VWAP 디버그] currentPrice: $currentPrice');
+                            print('🔍 [VWAP 디버그] vwap: $vwap');
+                            
+                            if (currentPrice != null && currentPrice > 0) {
+                              final diff = ((currentPrice.toDouble() - vwap) / vwap) * 100;
+                              valueLine = 'VWAP ${fmtPricePlain(vwap)}${overseas ? '' : '원'} (현재가 ${fmtPricePlain(currentPrice)}${overseas ? '' : '원'}, ${diff >= 0 ? '+' : ''}${diff.toStringAsFixed(1)}%)';
+                            } else {
+                              valueLine = 'VWAP ${fmtPricePlain(vwap)}${overseas ? '' : '원'} (현재가 데이터 부족)';
+                            }
+                          }
                           break;
                         case 'adx':
                           if (adx != null) {
@@ -268,6 +291,7 @@ class IntegratedAnalysisSection extends StatelessWidget {
                           ]),
                           if (valueLine.isNotEmpty) ...[const SizedBox(height: 6), Text(valueLine, style: TextStyle(fontSize: 11, color: Colors.grey[700]))],
                           if (detailedReason.isNotEmpty) ...[const SizedBox(height: 6), Text(detailedReason, style: TextStyle(fontSize: 11, color: Colors.grey[600], height: 1.3))],
+                          ...[const SizedBox(height: 4), Text(_getCalculationMethod(indicatorName), style: TextStyle(fontSize: 10, color: Colors.grey[500], fontStyle: FontStyle.italic))],
                         ]),
                       );
                     }).toList(),
@@ -332,5 +356,49 @@ class IntegratedAnalysisSection extends StatelessWidget {
       'bollinger',
       'movingAverage',
     ];
+  }
+
+  /// 전일대비 등락률을 포함한 분석 이유 생성
+  String _buildAnalysisReasonWithPriceChange(String reason, Map<String, dynamic> analysis, String finalSignal, double comprehensiveScore, Map<String, dynamic> individualScores) {
+    final technicalData = analysis['technicalData'] as Map<String, dynamic>?;
+    if (technicalData == null) {
+      return reason.isNotEmpty ? reason : generateComprehensiveAnalysisReason(analysis, finalSignal, comprehensiveScore, individualScores);
+    }
+
+    final currentPrice = (technicalData['currentPrice'] as num?)?.toDouble();
+    final prevClose = (technicalData['prevClose'] as num?)?.toDouble();
+    
+    String priceChangeInfo = '';
+    if (currentPrice != null && prevClose != null && prevClose > 0) {
+      final changeRate = ((currentPrice - prevClose) / prevClose) * 100;
+      final changeAmount = currentPrice - prevClose;
+      final changeSign = changeAmount >= 0 ? '+' : '';
+      priceChangeInfo = '전일 대비 ${changeSign}${changeRate.toStringAsFixed(2)}% (${changeSign}${changeAmount.toStringAsFixed(0)}원)\n\n';
+    }
+
+    final baseReason = reason.isNotEmpty ? reason : generateComprehensiveAnalysisReason(analysis, finalSignal, comprehensiveScore, individualScores);
+    return priceChangeInfo + baseReason;
+  }
+
+  /// 지표별 계산 방법 요약 반환
+  String _getCalculationMethod(String indicatorName) {
+    switch (indicatorName) {
+      case 'volume':
+        return '거래량: 현재 거래량 vs 평균 거래량 비교';
+      case 'rsi':
+        return 'RSI: 14기간 RSI (Gain/Loss EMA 기반)';
+      case 'macd':
+        return 'MACD: EMA(12) - EMA(26), Signal=EMA(9)';
+      case 'bollinger':
+        return '볼린저: MA(20) ± 2σ (표준편차)';
+      case 'movingAverage':
+        return '이동평균: MA(5), MA(20), MA(60)';
+      case 'vwap':
+        return 'VWAP: ∑(Price×Volume)/∑Volume (일중)';
+      case 'adx':
+        return 'ADX: 14기간 ADX (DMI 기반)';
+      default:
+        return '계산식: 데이터 기반 분석';
+    }
   }
 }

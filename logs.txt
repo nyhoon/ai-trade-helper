@@ -1,0 +1,30 @@
+﻿2025-10-07T02:32:21.340024Z ? ensurechartandanalyze: ???꾩옱媛 ?곗씠??????꾨즺: 228760 (currentPrice: 20750, ?뺢퇋?? false)
+
+2025-10-07T02:32:21.340075Z ? ensurechartandanalyze: ?뱤 3?④퀎: 遺꾩꽍 ?곗씠??怨꾩궛 ?쒖옉 - 228760
+
+2025-10-07T02:32:21.340107Z ? ensurechartandanalyze: ?㎜ 遺꾩꽍 ?곗씠??怨꾩궛: 228760
+
+2025-10-07T02:32:21.340139Z ? ensurechartandanalyze: ?좑툘 李⑦듃 ?곗씠??遺議? 228760 (0媛?
+
+2025-10-07T02:32:21.340166Z ? ensurechartandanalyze: ?뱤 3?④퀎 ?꾨즺: 遺꾩꽍 ?곗씠??怨꾩궛 - 228760
+
+2025-10-07T02:32:21.340201Z ? ensurechartandanalyze: ?뱤 4?④퀎: 遺꾩꽍 ?곗씠??????쒖옉 - 228760
+
+2025-10-07T02:32:21.344096Z ? ensurechartandanalyze: ?뵇 [KISProxy] ?댁쇅二쇱떇 ?꾩옱媛 API ?묐떟 (ASTL): {"output1":{"rsym":"DNASASTL","zdiv":"4","curr":"USD","base":"3.3100","open":"3.3500","high":"3.5900","low":"3.2800","last":"3.5700","dymd":"20251007","dhms":"090000","bvol":"0","avol":"0","bdvl":"0","advl":"0","code":"ASTL","ropen":"+1.21","rhigh":"+8.46","rlow":"-0.91","rclose":"+7.85"},"output2":{"pbid1":"0.0000","pask1":"0.0000","vbid1":"0","vask1":"0","dbid1":"0","dask1":"0"},"output3":{"vstm":"","vetm":"","csbp":"","cshi":"","cslo":"","iep":"","iev":""},"rt_cd":"0","msg_cd":"MCA00000","msg1":"?뺤긽泥섎━ ?섏뿀?듬땲??"}
+
+2025-10-07T02:32:21.344108Z ? ensurechartandanalyze: ?뵇 [KISProxy] output1 keys: rsym, zdiv, curr, base, open, high, low, last, dymd, dhms, bvol, avol, bdvl, advl, code, ropen, rhigh, rlow, rclose
+
+2025-10-07T02:32:21.344141Z ? ensurechartandanalyze: ?뵇 [KISProxy] output1.last: 3.5700, output1.bidp: undefined, output1.askp: undefined
+
+2025-10-07T02:32:21.344197Z ? ensurechartandanalyze: ???꾩옱媛 議고쉶 ?깃났: ASTL - 3.57
+
+2025-10-07T02:32:21.344217Z ? ensurechartandanalyze: ?뱤 2?④퀎 ?꾨즺: ?꾩옱媛 ?곗씠??議고쉶 - ASTL
+
+2025-10-07T02:32:21.348127Z ? ensurechartandanalyze: ???꾩옱媛 ?곗씠??????꾨즺: DKNG (currentPrice: 34.98, ?뺢퇋?? false)
+
+2025-10-07T02:32:21.348163Z ? ensurechartandanalyze: ?뱤 3?④퀎: 遺꾩꽍 ?곗씠??怨꾩궛 ?쒖옉 - DKNG
+
+2025-10-07T02:32:21.348203Z ? ensurechartandanalyze: ?㎜ 遺꾩꽍 ?곗씠??怨꾩궛: DKNG
+
+2025-10-07T02:32:21.348210Z ? ensurechartandanalyze: ?좑툘 李⑦듃 ?곗씠??遺議? DKNG (0媛?
+

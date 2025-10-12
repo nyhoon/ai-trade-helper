@@ -1,4 +1,6 @@
 import '../remote/analysis_functions_service.dart';
+import '../data/stock_master_parser.dart';
+import '../trading/investment_style_manager.dart';
 
 /// 서버 분석 Shim: 레거시 시그니처를 유지하며 Firebase Functions로 위임
 class UnifiedAnalysisService {
@@ -17,11 +19,88 @@ class UnifiedAnalysisService {
     int days = 100,
   }) async {
     try {
-      return await AnalysisFunctionsService().analyzeStock(symbol: stockCode, days: days);
+      // 투자 스타일 임계값 전달(서버 임계값 미일치 방지)
+      double? buyTh;
+      double? sellTh;
+      try {
+        final styleParams = await InvestmentStyleManager().getStyleParameters(
+          InvestmentStyleManager().currentStyle,
+        );
+        buyTh = (styleParams['buyThreshold'] as num?)?.toDouble();
+        sellTh = (styleParams['sellThreshold'] as num?)?.toDouble();
+      } catch (_) {}
+
+      // 심볼 정규화 및 후보 생성
+      final candidates = <String>{};
+      final orig = stockCode.toString();
+      candidates.add(orig);
+      candidates.add(orig.toUpperCase());
+      try {
+        final parser = StockMasterParser();
+        if (parser.isInitialized) {
+          // 정확 일치 우선
+          if (parser.getNasdaqStockCodes().contains(orig)) candidates.add(orig);
+          // startsWith 후보(해외 심볼 누락 보정)
+          final startCand = parser
+              .getNasdaqStockCodes()
+              .firstWhere((e) => e.startsWith(orig.toUpperCase()), orElse: () => '');
+          if (startCand.isNotEmpty) candidates.add(startCand);
+        }
+      } catch (_) {}
+      if (orig.length == 3) {
+        for (final sfx in ['A', 'B', 'C']) {
+          candidates.add(orig + sfx);
+        }
+      }
+
+      Map<String, dynamic>? normalized;
+      for (final symbol in candidates) {
+        final raw = await AnalysisFunctionsService().analyzeStock(
+          symbol: symbol,
+          days: days,
+          buyThreshold: buyTh,
+          sellThreshold: sellTh,
+        );
+        final norm = _normalizeServerResponse(raw);
+        final hasScores = (norm['individualScores'] is Map) && (norm['individualScores'] as Map).isNotEmpty;
+        final hasTech = (norm['technicalData'] is Map) && (norm['technicalData'] as Map).isNotEmpty;
+        if (hasScores || hasTech) {
+          normalized = norm;
+          normalized['symbol'] = symbol;
+          break;
+        }
+      }
+
+      if (normalized != null) return normalized;
+
+      // 모든 후보 실패 시 마지막 응답을 그대로 정규화 없이 반환
+      final raw = await AnalysisFunctionsService().analyzeStock(
+        symbol: stockCode,
+        days: days,
+        buyThreshold: buyTh,
+        sellThreshold: sellTh,
+      );
+      final fallback = _normalizeServerResponse(raw);
+      return fallback;
     } catch (_) {
       return null;
     }
   }
+}
+
+Map<String, dynamic> _normalizeServerResponse(dynamic raw) {
+  if (raw is! Map) return <String, dynamic>{};
+  final result = raw.map((k, v) => MapEntry(k.toString(), v));
+  if (!result.containsKey('comprehensiveScore') && result.containsKey('totalScore')) {
+    result['comprehensiveScore'] = result['totalScore'];
+  }
+  if (!result.containsKey('individualScores') && result.containsKey('scores')) {
+    result['individualScores'] = result['scores'];
+  }
+  if (!result.containsKey('technicalData') && result.containsKey('indicators')) {
+    result['technicalData'] = result['indicators'];
+  }
+  return Map<String, dynamic>.from(result);
 }
 
 /*
@@ -502,7 +581,9 @@ class UnifiedAnalysisService {
           } else {
             print('📊 [UnifiedAnalysis] 통합 API에서 차트 데이터 조회: $stockCode');
             // 서버 전환: 통일API 대신 서버 캐시 사용
-            chartData = await RemoteKisService.instance.getDailyChart(stockCode, days: ChartConstants.CHART_MIN_BARS);
+            // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+            print('📊 [UnifiedAnalysis] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+            chartData = <Map<String, dynamic>>[];
             print('📊 [UnifiedAnalysis] 통합 API 응답 차트 데이터: $stockCode (${chartData.length}개)');
             
             if (chartData.isNotEmpty) {
@@ -514,7 +595,9 @@ class UnifiedAnalysisService {
           }
         } else {
           print('🇰🇷 [UnifiedAnalysis] 서버 캐시 차트 조회: $stockCode');
-          chartData = await RemoteKisService.instance.getDailyChart(stockCode, days: ChartConstants.CHART_MIN_BARS);
+          // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+          print('📊 [UnifiedAnalysis] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+          chartData = <Map<String, dynamic>>[];
         }
       }
       
@@ -544,45 +627,12 @@ class UnifiedAnalysisService {
       } else {
         print('📊 [UnifiedAnalysis] 로컬 DB에 실시간 데이터 없음, API 호출: $stockCode');
         // 로컬DB에 없을 때만 API 호출 (폴백)
-        try {
-          if (isNasdaq) {
-            print('🌍 [UnifiedAnalysis] 나스닥 종목 데이터 조회: $stockCode');
-            data = await RemoteKisService.instance.getCurrentPrice(stockCode);
-            if (data == null || (data['prpr'] ?? 0) == 0) {
-              final resolved = _resolveUsSymbol(stockCode);
-              if (resolved != stockCode) {
-                print('🔁 해외 현재가 심볼 교정 재시도: $stockCode -> $resolved');
-                data = await RemoteKisService.instance.getCurrentPrice(resolved);
-              }
-            }
-          } else {
-          print('🇰🇷 [UnifiedAnalysis] 서버 캐시 현재가 조회: $stockCode');
-          data = await RemoteKisService.instance.getCurrentPrice(stockCode);
-          }
-          
-          print('🔍 [UnifiedAnalysis] KIS API 응답: $data');
-          if (data != null) {
-            print('🔍 [UnifiedAnalysis] API 데이터 상세:');
-            print('  - 현재가: ${data['currentPrice']}');
-            print('  - 전일가: ${data['prevClose']}');
-            print('  - 거래량: ${data['volume']}');
-            print('  - 고가: ${data['high']}');
-            print('  - 저가: ${data['low']}');
-            print('  - 시가: ${data['open']}');
-          } else {
-            print('🔍 [UnifiedAnalysis] API 데이터가 null입니다.');
-          }
-          
-          if (data == null || data.isEmpty) {
-            print('❌ [UnifiedAnalysis] 시장 데이터 없음: $stockCode');
-            return null;
-          }
-        } catch (e) {
-          print('❌ [UnifiedAnalysis] API 호출 실패: $stockCode - $e');
-          // API 실패 시 로컬 DB에서 히스토리 데이터로 보강
-          print('⚠️ [UnifiedAnalysis] 로컬 DB 히스토리 데이터로 폴백: $stockCode');
-          return await _getLocalMarketData(stockCode);
-        }
+        // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+        print('📊 [UnifiedAnalysis] 직접 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+        
+        // 로컬 DB 히스토리 데이터로 폴백
+        print('⚠️ [UnifiedAnalysis] 로컬 DB 히스토리 데이터로 폴백: $stockCode');
+        return await _getLocalMarketData(stockCode);
       }
       
       // 나스닥 종목의 경우 현재가 API 응답을 차트 데이터로 변환
@@ -961,7 +1011,9 @@ class UnifiedAnalysisService {
             print('📊 [UnifiedAnalysis] 로컬 DB 데이터가 오래됨 (최신: $latestDate, 오늘: $today), API 호출: $stockCode');
             // 통합 API 사용으로 자동 시장 판별 및 적절한 exchangeCode 선택
             print('🔄 [UnifiedAnalysis] 통합 API 호출: $stockCode (자동 시장 판별)');
-            chartData = await RemoteKisService.instance.getDailyChart(stockCode, days: ChartConstants.CHART_MIN_BARS);
+            // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+            print('📊 [UnifiedAnalysis] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+            chartData = <Map<String, dynamic>>[];
             print('📊 [UnifiedAnalysis] 통합 API 응답: $stockCode (${chartData.length}개)');
             
             // API에서 가져온 최신 데이터를 DB에 저장
@@ -979,7 +1031,9 @@ class UnifiedAnalysisService {
           print('📊 [UnifiedAnalysis] 로컬 DB에 데이터 없음, 통합 API 호출: $stockCode');
           // 통합 API 사용으로 자동 시장 판별 및 적절한 exchangeCode 선택
           print('🔄 [UnifiedAnalysis] 통합 API 호출: $stockCode (자동 시장 판별)');
-          chartData = await RemoteKisService.instance.getDailyChart(stockCode, days: ChartConstants.CHART_MIN_BARS);
+          // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+          print('📊 [UnifiedAnalysis] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+          chartData = <Map<String, dynamic>>[];
           print('📊 [UnifiedAnalysis] 통합 API 응답: $stockCode (${chartData.length}개)');
           
           // API에서 가져온 데이터를 DB에 저장

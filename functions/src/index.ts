@@ -1,6 +1,7 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
 import { StockDataService } from './stock_data_service';
+import { AnalysisEngine } from './analysis_engine';
 
 // Firebase Admin SDK 초기화
 if (!admin.apps.length) {
@@ -22,7 +23,8 @@ export const getStockData = functions.https.onCall({
       console.log(`✅ 인증된 사용자: ${context.auth.uid}`);
     }
     
-    const { symbol, uid } = data;
+    const actualData = (data?.data) ?? data;
+    const { symbol, uid } = actualData;
 
     if (!symbol) {
       return { success: false, error: 'symbol is required' };
@@ -56,7 +58,8 @@ export const getMultipleStockData = functions.https.onCall({
   region: 'asia-northeast3'
 }, async (data: any, context: any) => {
   try {
-    const { symbols, uid } = data;
+    const actualData = (data?.data) ?? data;
+    const { symbols, uid } = actualData;
     
     if (!symbols || !Array.isArray(symbols)) {
       return { success: false, error: 'symbols array is required' };
@@ -110,7 +113,8 @@ export const refreshStockData = functions.https.onCall({
   region: 'asia-northeast3'
 }, async (data: any, context: any) => {
   try {
-    const { symbol, uid } = data;
+    const actualData = (data?.data) ?? data;
+    const { symbol, uid } = actualData;
     
     if (!symbol) {
       return { success: false, error: 'symbol is required' };
@@ -145,7 +149,8 @@ export const getStockDataStatus = functions.https.onCall({
   region: 'asia-northeast3'
 }, async (data: any, context: any) => {
   try {
-    const { symbol } = data;
+    const actualData = (data?.data) ?? data;
+    const { symbol } = actualData;
     
     if (!symbol) {
       return { success: false, error: 'symbol is required' };
@@ -191,6 +196,7 @@ export const getStockDataStatus = functions.https.onCall({
     };
   }
 });
+
 
 /**
  * 차트 데이터 생성 및 분석 Functions
@@ -296,7 +302,8 @@ export const getCurrentPrice = functions.https.onCall({
       console.log(`✅ 인증된 사용자: ${context.auth.uid}`);
     }
     
-    const { symbol, uid } = data;
+    const actualData = (data?.data) ?? data;
+    const { symbol, uid } = actualData;
     
     if (!symbol) {
       return { success: false, error: 'symbol is required' };
@@ -335,7 +342,7 @@ export const analyzeStock = functions.https.onCall({
       console.log(`✅ 인증된 사용자: ${context.auth.uid}`);
     }
     
-    const { symbol, days } = data;
+    const { symbol, days = 100 } = data;
     
     if (!symbol) {
       return { success: false, error: 'symbol is required' };
@@ -343,20 +350,24 @@ export const analyzeStock = functions.https.onCall({
     
     console.log(`📊 종목 분석 요청: ${symbol} (days: ${days})`);
     
-    // 기본 분석 로직 (간단한 구현)
-    const result = {
+    // 1. 차트 데이터 조회
+    const chartData = await StockDataService.ensureChartData(symbol);
+    if (!chartData || chartData.length === 0) {
+      return { success: false, error: '차트 데이터를 조회할 수 없습니다' };
+    }
+    
+    // 2. 현재가 조회
+    const currentPrice = await StockDataService.getCurrentPrice(symbol);
+    
+    // 3. 7개 지표 기반 분석 수행
+    const analysis = await AnalysisEngine.analyzeStock(symbol, chartData, currentPrice, context.auth?.uid || 'anonymous');
+    
+    console.log(`✅ 종목 분석 완료: ${symbol} (점수: ${analysis.totalScore.toFixed(3)})`);
+    return {
       success: true,
       symbol,
-      analysis: {
-        score: Math.random() * 2 - 1, // -1 ~ 1 사이의 랜덤 점수
-        recommendation: Math.random() > 0.5 ? 'BUY' : 'SELL',
-        confidence: Math.random() * 0.5 + 0.5, // 0.5 ~ 1.0
-        lastUpdated: new Date().toISOString()
-      }
+      analysis
     };
-    
-    console.log(`✅ 종목 분석 완료: ${symbol}`);
-    return result;
   } catch (error) {
     console.error('❌ 종목 분석 실패:', error);
     return {
@@ -374,7 +385,7 @@ export const analyzeWatchlist = functions.https.onCall({
   region: 'asia-northeast3'
 }, async (data: any, context: any) => {
   try {
-    const { uid, days } = data;
+    const { uid, days = 100 } = data;
     
     if (!uid) {
       return { success: false, error: 'uid is required' };
@@ -382,25 +393,34 @@ export const analyzeWatchlist = functions.https.onCall({
     
     console.log(`📊 관심종목 분석 요청: ${uid} (days: ${days})`);
     
-    // 기본 분석 로직 (간단한 구현)
-    const results = [
-      {
-        symbol: 'AAPL',
-        analysis: {
-          score: Math.random() * 2 - 1,
-          recommendation: 'BUY',
-          confidence: Math.random() * 0.5 + 0.5
+    // 1. Firestore에서 관심종목 조회
+    const db = admin.firestore();
+    const watchlistRef = db.collection('users').doc(uid).collection('watchlist');
+    const watchlistSnap = await watchlistRef.get();
+    
+    if (watchlistSnap.empty) {
+      return { success: true, results: [] };
+    }
+    
+    // 2. 각 관심종목에 대해 분석 수행
+    const results = [];
+    for (const doc of watchlistSnap.docs) {
+      const symbol = doc.id;
+      try {
+        const chartData = await StockDataService.ensureChartData(symbol);
+        const currentPrice = await StockDataService.getCurrentPrice(symbol);
+        
+        if (chartData && chartData.length > 0) {
+          const analysis = await AnalysisEngine.analyzeStock(symbol, chartData, currentPrice, uid);
+          results.push({
+            symbol,
+            analysis
+          });
         }
-      },
-      {
-        symbol: 'MSFT',
-        analysis: {
-          score: Math.random() * 2 - 1,
-          recommendation: 'SELL',
-          confidence: Math.random() * 0.5 + 0.5
-        }
+      } catch (error) {
+        console.error(`❌ 관심종목 분석 실패: ${symbol}`, error);
       }
-    ];
+    }
     
     console.log(`✅ 관심종목 분석 완료: ${uid} (${results.length}개)`);
     return {
@@ -424,7 +444,7 @@ export const analyzeHoldings = functions.https.onCall({
   region: 'asia-northeast3'
 }, async (data: any, context: any) => {
   try {
-    const { uid, days } = data;
+    const { uid, days = 100 } = data;
     
     if (!uid) {
       return { success: false, error: 'uid is required' };
@@ -432,17 +452,34 @@ export const analyzeHoldings = functions.https.onCall({
     
     console.log(`📊 보유종목 분석 요청: ${uid} (days: ${days})`);
     
-    // 기본 분석 로직 (간단한 구현)
-    const results = [
-      {
-        symbol: 'TSLA',
-        analysis: {
-          score: Math.random() * 2 - 1,
-          recommendation: 'HOLD',
-          confidence: Math.random() * 0.5 + 0.5
+    // 1. Firestore에서 보유종목 조회
+    const db = admin.firestore();
+    const holdingsRef = db.collection('users').doc(uid).collection('holdings');
+    const holdingsSnap = await holdingsRef.get();
+    
+    if (holdingsSnap.empty) {
+      return { success: true, results: [] };
+    }
+    
+    // 2. 각 보유종목에 대해 분석 수행
+    const results = [];
+    for (const doc of holdingsSnap.docs) {
+      const symbol = doc.id;
+      try {
+        const chartData = await StockDataService.ensureChartData(symbol);
+        const currentPrice = await StockDataService.getCurrentPrice(symbol);
+        
+        if (chartData && chartData.length > 0) {
+          const analysis = await AnalysisEngine.analyzeStock(symbol, chartData, currentPrice, uid);
+          results.push({
+            symbol,
+            analysis
+          });
         }
+      } catch (error) {
+        console.error(`❌ 보유종목 분석 실패: ${symbol}`, error);
       }
-    ];
+    }
     
     console.log(`✅ 보유종목 분석 완료: ${uid} (${results.length}개)`);
     return {
@@ -466,7 +503,7 @@ export const getTopRecommendations = functions.https.onCall({
   region: 'asia-northeast3'
 }, async (data: any, context: any) => {
   try {
-    const { uid, limit } = data;
+    const { uid, limit = 10 } = data;
     
     if (!uid) {
       return { success: false, error: 'uid is required' };
@@ -474,26 +511,39 @@ export const getTopRecommendations = functions.https.onCall({
     
     console.log(`📊 추천 종목 요청: ${uid} (limit: ${limit})`);
     
-    // 기본 추천 로직 (간단한 구현)
-    const items = [
-      {
-        symbol: 'NVDA',
-        score: Math.random() * 2 - 1,
-        recommendation: 'BUY',
-        confidence: Math.random() * 0.5 + 0.5
-      },
-      {
-        symbol: 'GOOGL',
-        score: Math.random() * 2 - 1,
-        recommendation: 'BUY',
-        confidence: Math.random() * 0.5 + 0.5
-      }
-    ];
+    // 1. 인기 종목 리스트 (실제로는 더 많은 종목을 분석)
+    const popularStocks = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX', 'PLTZ', 'NVD'];
     
-    console.log(`✅ 추천 종목 완료: ${uid} (${items.length}개)`);
+    // 2. 각 종목에 대해 분석 수행
+    const results = [];
+    for (const symbol of popularStocks) {
+      try {
+        const chartData = await StockDataService.ensureChartData(symbol);
+        const currentPrice = await StockDataService.getCurrentPrice(symbol);
+        
+        if (chartData && chartData.length > 0) {
+          const analysis = await AnalysisEngine.analyzeStock(symbol, chartData, currentPrice, uid);
+          results.push({
+            symbol,
+            score: analysis.totalScore,
+            recommendation: analysis.recommendation,
+            confidence: analysis.confidence,
+            analysis
+          });
+        }
+      } catch (error) {
+        console.error(`❌ 추천종목 분석 실패: ${symbol}`, error);
+      }
+    }
+    
+    // 3. 점수순으로 정렬하고 상위 N개 반환
+    results.sort((a, b) => b.score - a.score);
+    const topResults = results.slice(0, limit);
+    
+    console.log(`✅ 추천 종목 완료: ${uid} (${topResults.length}개)`);
     return {
       success: true,
-      items
+      items: topResults
     };
   } catch (error) {
     console.error('❌ 추천 종목 실패:', error);

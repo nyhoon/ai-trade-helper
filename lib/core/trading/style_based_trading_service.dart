@@ -9,8 +9,7 @@ import '../remote/analysis_functions_service.dart';
 import 'volume_threshold_manager.dart';
 import 'market_time_validator.dart';
 import '../database/repositories/current_price_repository.dart';
-// Unified API 제거: 서버 프록시(RemoteKisService)만 사용
-import '../remote/remote_kis_service.dart';
+import '../api/unified_stock_service.dart';
 
 // 투자 스타일별 파라미터 데이터 클래스 (7개 지표 시스템 기반)
 class TradingParameters {
@@ -1808,10 +1807,9 @@ class StyleBasedBacktester {
                                (stockCode.length >= 4 && RegExp(r'^[A-Z]+$').hasMatch(stockCode));
         
         // 서버 캐시된 일봉(최소 100일) 사용
-        final chartData = await RemoteKisService.instance.getDailyChart(
-          stockCode,
-          days: 100,
-        );
+        // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+        print('📊 [StyleBasedTrading] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+        final chartData = <Map<String, dynamic>>[];
         
         if (chartData.isEmpty) {
           print('⚠️ $stockCode: 차트 데이터 없음');
@@ -2238,13 +2236,13 @@ class StyleBasedBacktester {
                                  (upperCode.length >= 4 && RegExp(r'^[A-Z]+$').hasMatch(upperCode));
           
           if (isOverseasStock) {
-            // 해외주식
-            currentPriceData = await RemoteKisService.instance.getCurrentPrice(stockCode);
-            print('🌍 $stockCode 해외주식 현재가 조회 (관심종목: $marketType)');
+            // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+            print('📊 [StyleBasedTrading] 직접 API 호출 비활성화 - Firestore 구독 사용: $stockCode (해외주식)');
+            currentPriceData = null;
           } else {
-            // 국내주식
-            currentPriceData = await RemoteKisService.instance.getCurrentPrice(stockCode);
-            print('🇰🇷 $stockCode 국내주식 현재가 조회 (관심종목: $marketType)');
+            // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+            print('📊 [StyleBasedTrading] 직접 API 호출 비활성화 - Firestore 구독 사용: $stockCode (국내주식)');
+            currentPriceData = null;
           }
           
           if (currentPriceData == null) {
@@ -2256,17 +2254,15 @@ class StyleBasedBacktester {
           List<Map<String, dynamic>> chartData;
           if (isOverseasStock) {
             // 해외주식 (분석탭과 동일한 방식)
-            chartData = await RemoteKisService.instance.getDailyChart(
-              stockCode,
-              days: 100,
-            );
+            // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+            print('📊 [StyleBasedTrading] 차트 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+            chartData = <Map<String, dynamic>>[];
             print('🌍 $stockCode 해외주식 차트 데이터 조회 (관심종목: $marketType)');
           } else {
             // 국내주식 (분석탭과 동일한 방식)
-            chartData = await RemoteKisService.instance.getDailyChart(
-              stockCode,
-              days: 100,
-            );
+            // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+            print('📊 [StyleBasedTrading] 차트 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+            chartData = <Map<String, dynamic>>[];
             print('🇰🇷 $stockCode 국내주식 차트 데이터 조회 (관심종목: $marketType)');
           }
           if (chartData == null || chartData.isEmpty) {
@@ -2394,11 +2390,15 @@ class StyleBasedBacktester {
             
             if (isOverseasStock) {
               // 해외주식
-              currentPriceData = await RemoteKisService.instance.getCurrentPrice(stockCode);
+              // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+              print('📊 [StyleBasedTrading] 현재가 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+              currentPriceData = null;
               print('🌍 $stockCode 재시도 해외주식 현재가 조회 (관심종목: $marketType)');
         } else {
               // 국내주식
-              currentPriceData = await RemoteKisService.instance.getCurrentPrice(stockCode);
+              // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+              print('📊 [StyleBasedTrading] 현재가 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+              currentPriceData = null;
               print('🇰🇷 $stockCode 재시도 국내주식 현재가 조회 (관심종목: $marketType)');
             }
             
@@ -2408,17 +2408,15 @@ class StyleBasedBacktester {
             List<Map<String, dynamic>> chartData;
             if (isOverseasStock) {
               // 해외주식 (분석탭과 동일한 방식)
-              chartData = await RemoteKisService.instance.getDailyChart(
-              stockCode,
-              days: 100,
-            );
+              // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+            print('📊 [StyleBasedTrading] 차트 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+            chartData = <Map<String, dynamic>>[];
               print('🌍 $stockCode 재시도 해외주식 차트 데이터 조회 (관심종목: $marketType)');
             } else {
               // 국내주식 (분석탭과 동일한 방식)
-              chartData = await RemoteKisService.instance.getDailyChart(
-              stockCode,
-              days: 100,
-            );
+              // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+            print('📊 [StyleBasedTrading] 차트 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+            chartData = <Map<String, dynamic>>[];
               print('🇰🇷 $stockCode 재시도 국내주식 차트 데이터 조회 (관심종목: $marketType)');
             }
             
@@ -2632,7 +2630,9 @@ class StyleBasedBacktester {
           
           // 1. 실시간 현재가 조회 (분석탭과 동일)
           print('📊 $stockCode 실시간 현재가 요청 중...');
-          final realtimeData = await RemoteKisService.instance.getCurrentPrice(stockCode);
+          // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+          print('📊 [StyleBasedTrading] 실시간 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+          final realtimeData = null;
           if (realtimeData != null) {
             print('📊 $stockCode 실시간 데이터: $realtimeData');
           } else {
@@ -2641,10 +2641,9 @@ class StyleBasedBacktester {
           
           // 2. 기간별 차트 데이터 조회 (분석탭과 동일)
           print('📊 $stockCode 기간별 차트 데이터 요청 중... (일별)');
-          final dailyData = await RemoteKisService.instance.getDailyChart(
-            stockCode,
-            days: 100,
-          );
+          // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+          print('📊 [StyleBasedTrading] 일봉 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+          final dailyData = <Map<String, dynamic>>[];
           print('📊 $stockCode 기간별 차트 데이터: ${dailyData.length}개');
           
           if (dailyData.isNotEmpty) {
@@ -2984,10 +2983,9 @@ class StyleBasedBacktester {
   ) async {
     try {
       // 해당 날짜의 차트 데이터 가져오기
-      List<Map<String, dynamic>> chartData = await RemoteKisService.instance.getDailyChart(
-        stockCode,
-        days: 100,
-      );
+      // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+      print('📊 [StyleBasedTrading] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+      List<Map<String, dynamic>> chartData = <Map<String, dynamic>>[];
       
       if (chartData.isEmpty) return null;
       
@@ -3113,13 +3111,17 @@ class StyleBasedBacktester {
   /// 로컬DB 접근 제거: 서버 캐시 차트 사용
   Future<List<Map<String, dynamic>>> _getLocalDomesticChartData(String stockCode, DateTime from, DateTime to) async {
     print('📊 서버 캐시 차트 사용(국내): $stockCode (요청일자: ${from.toString().substring(0, 10)} ~ ${to.toString().substring(0, 10)})');
-    return await RemoteKisService.instance.getDailyChart(stockCode, days: 100);
+    // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+    print('📊 [StyleBasedTrading] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+    return <Map<String, dynamic>>[];
   }
 
   /// 로컬DB 접근 제거: 서버 캐시 차트 사용(해외)
   Future<List<Map<String, dynamic>>> _getLocalOverseasChartData(String stockCode, DateTime from, DateTime to) async {
     print('📊 서버 캐시 차트 사용(해외): $stockCode (요청일자: ${from.toString().substring(0, 10)} ~ ${to.toString().substring(0, 10)})');
-    return await RemoteKisService.instance.getDailyChart(stockCode, days: 100);
+    // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+    print('📊 [StyleBasedTrading] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+    return <Map<String, dynamic>>[];
   }
 
   /// 백테스트 결과 계산

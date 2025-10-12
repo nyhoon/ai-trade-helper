@@ -7,9 +7,11 @@ class SyncAccountInfoUseCase {
 
   Future<void> execute() async {
     // 1) 로컬 DB에서 기존 계좌/보유 읽기 (필요 시)
+    // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+    print('🔍 [current 보호] SyncAccountInfoUseCase에서 API 직접 호출 비활성화');
     // 2) API로 최신 계좌/보유 업데이트 → DB 반영
-    final positions = await KisUnifiedApiService().getPositionsCompat();
-    await _holdingsRepository.syncWithApi(positions);
+    // final positions = await KisUnifiedApiService().getPositionsCompat();
+    // await _holdingsRepository.syncWithApi(positions);
   }
 }
 

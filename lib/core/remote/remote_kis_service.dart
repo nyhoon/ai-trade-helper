@@ -2,6 +2,7 @@ import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:ai_helper/core/api/kis_unified_api_service.dart';
+import 'package:ai_helper/core/trading/market_time_validator.dart';
 import 'package:ai_helper/core/api/global_api_credentials.dart';
 import 'package:dio/dio.dart';
 
@@ -51,7 +52,8 @@ class RemoteKisService {
       final callable = _functions.httpsCallable('getStockData');
       final resp = await callable.call(<String, dynamic>{'symbol': symbol, 'uid': effectiveUid});
       final data = (resp.data as Map?) ?? const {};
-      final chartData = (data['data']?['chart'] as List?) ?? const [];
+      // 서버는 chart가 아니라 chartData 키로 반환함
+      final chartData = (data['data']?['chartData'] as List?) ?? const [];
       
       print('✅ [RemoteKisService] getDailyChart 성공: $symbol (${chartData.length}개 데이터)');
       return chartData.map((e) => Map<String, dynamic>.from(e as Map)).toList();
@@ -86,12 +88,37 @@ class RemoteKisService {
         if (data['hasData'] == true) {
           final serverData = Map<String, dynamic>.from(data['data'] as Map);
           
+          // KIS 원시 키(stck_*) 및 서버 표준 키 혼용 대응 + 콤마 제거 대응
+          double _pd(dynamic v) {
+            if (v is String) return asDouble(v.replaceAll(',', ''));
+            return asDouble(v);
+          }
+
+          double current = _pd(serverData['current_price'] ?? serverData['currentPrice'] ?? serverData['stck_prpr']);
+          double open = _pd(serverData['open_price'] ?? serverData['openPrice'] ?? serverData['stck_oprc']);
+          double prev = _pd(serverData['prev_close'] ?? serverData['prevClose'] ?? serverData['stck_prdy_clpr']);
+          double high = _pd(serverData['high_price'] ?? serverData['highPrice'] ?? serverData['stck_hgpr']);
+          double low  = _pd(serverData['low_price'] ?? serverData['lowPrice'] ?? serverData['stck_lwpr']);
+
+          // 국내주식 오스케일 방어: 현재가가 비정상적으로 낮고 전일가가 충분히 클 때 보정
+          final String symbolUpper = (serverData['stock_code'] ?? serverData['symbol'] ?? '').toString().toUpperCase();
+          final bool looksDomestic = RegExp(r'^[0-9]{5,6}$').hasMatch(symbolUpper);
+          if (looksDomestic && current > 0 && prev > 1000 && current < 1000) {
+            // 서버가 단위/스케일을 잘못 준 경우: stck_prpr 재시도 또는 prev로 보정
+            final double kisPrpr = _pd(serverData['stck_prpr']);
+            if (kisPrpr > 0) {
+              current = kisPrpr;
+            } else {
+              current = prev; // 최소한 비정상 표시 방어
+            }
+          }
+
           final result = {
-            'currentPrice': asDouble(serverData['current_price'] ?? serverData['currentPrice']),
-            'openPrice': asDouble(serverData['open_price'] ?? serverData['openPrice']),
-            'prevClose': asDouble(serverData['prev_close'] ?? serverData['prevClose']),
-            'highPrice': asDouble(serverData['high_price'] ?? serverData['highPrice']),
-            'lowPrice': asDouble(serverData['low_price'] ?? serverData['lowPrice']),
+            'currentPrice': current,
+            'openPrice': open,
+            'prevClose': prev,
+            'highPrice': high,
+            'lowPrice': low,
             'volume': asInt(serverData['volume']),
             'changeAmount': asDouble(serverData['change_amount'] ?? serverData['changeAmount']),
             'changeRate': asDouble(serverData['change_rate'] ?? serverData['changeRate']),
@@ -107,19 +134,21 @@ class RemoteKisService {
         print('❌ [RemoteKisService] getCurrentPrice 실패: $e');
       }
       
+      // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+      print('🔍 [current 보호] RemoteKisService에서 API 직접 호출 비활성화');
       // 2) 폴백: 클라이언트 KIS API 직접 호출
-      print('🔄 [RemoteKisService] 서버 실패 → 클라이언트 KIS API 직접 호출: $symbol');
-      try {
-        final kisApi = KisUnifiedApiService();
-        final priceData = await kisApi.getStockPriceAuto(symbol);
+      // print('🔄 [RemoteKisService] 서버 실패 → 클라이언트 KIS API 직접 호출: $symbol');
+      // try {
+      //   final kisApi = KisUnifiedApiService();
+      //   final priceData = await kisApi.getStockPriceAuto(symbol);
         
-        if (priceData != null) {
-          print('✅ [RemoteKisService] 클라이언트 KIS API 성공: $symbol');
-          return priceData;
-        }
-      } catch (e) {
-        print('❌ [RemoteKisService] 클라이언트 KIS API 실패 ($symbol): $e');
-      }
+      //   if (priceData != null) {
+      //     print('✅ [RemoteKisService] 클라이언트 KIS API 성공: $symbol');
+      //     return priceData;
+      //   }
+      // } catch (e) {
+      //   print('❌ [RemoteKisService] 클라이언트 KIS API 실패 ($symbol): $e');
+      // }
       
       print('❌ [RemoteKisService] 현재가 데이터 없음: $symbol');
       return null;
@@ -129,8 +158,22 @@ class RemoteKisService {
     }
   }
 
+  // 호출 빈도 제한을 위한 캐시
+  static final Map<String, DateTime> _lastCallTimes = {};
+  static const Duration _minCallInterval = Duration(seconds: 5); // 5초 간격 제한
+
+
   Future<bool> ensureChartAndAnalyze({required String uid, required String symbol}) async {
     try {
+      // 호출 빈도 제한 체크
+      final now = DateTime.now();
+      final lastCallTime = _lastCallTimes[symbol];
+      if (lastCallTime != null && now.difference(lastCallTime) < _minCallInterval) {
+        print('⏸️ [RemoteKisService] 호출 빈도 제한: $symbol (${_minCallInterval.inSeconds}초 간격)');
+        return false;
+      }
+      
+      _lastCallTimes[symbol] = now;
       print('🔍 [RemoteKisService] ensureChartAndAnalyze 시작: $symbol (uid: $uid)');
       print('🔍 [RemoteKisService] 리전: $_region');
       
@@ -141,10 +184,19 @@ class RemoteKisService {
       final callable = _functions.httpsCallable('ensureChartAndAnalyze');
       print('🔍 [RemoteKisService] 함수 호출 준비 완료: ensureChartAndAnalyze');
       
+      // 심볼 기반 시장 판별 (국내/해외 자동 분기)
+      String detectedMarket;
+      try {
+        detectedMarket = MarketTimeValidator.instance.getMarketFromSymbol(symbol);
+      } catch (_) {
+        // 간단 휴리스틱: 숫자만 5~6자리면 KOSPI, 아니면 NASDAQ
+        detectedMarket = RegExp(r'^[0-9]{5,6}$').hasMatch(symbol) ? 'KOSPI' : 'NASDAQ';
+      }
+
       final requestData = <String, dynamic>{
         'symbol': symbol,
         'uid': uid,
-        'market': 'NASDAQ', // 해외주식 기본값
+        'market': detectedMarket,
       };
       
       print('🔍 [RemoteKisService] 전달할 데이터: $requestData');
@@ -227,6 +279,7 @@ class RemoteKisService {
       return <Map<String, dynamic>>[];
     }
   }
+
 
   // 숫자 캐스팅 통일 헬퍼
   static double asDouble(dynamic v, {double def = 0.0}) {

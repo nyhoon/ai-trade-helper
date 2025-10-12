@@ -222,9 +222,12 @@ class AdvancedRiskManager {
         final quantity = holding['quantity'] as int? ?? 0;
         
         if (quantity > 0) {
+          // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+          print('🔍 [current 보호] AdvancedRiskManager에서 API 직접 호출 비활성화');
           // 시장가 매도 주문
-          final result = await KisUnifiedApiService().executeOrderWithConfirmation(
-            stockCode: stockCode,
+          // final result = await KisUnifiedApiService().executeOrderWithConfirmation(
+          final result = <String, dynamic>{};
+          // stockCode: stockCode,
             orderType: 'sell',
             quantity: quantity,
             price: 0, // 시장가

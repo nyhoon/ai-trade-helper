@@ -10,7 +10,9 @@ import '../../core/trading/investment_style.dart';
 import 'dart:async';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../../core/remote/remote_kis_service.dart';
+import '../../core/api/kis_unified_api_service.dart';
 import '../../core/api/unified_stock_service.dart';
+import '../../core/data/firestore_stock_service.dart';
 import 'watchlist_dialog.dart';
 import 'stock_selection_dialog.dart';
 import '../settings/investment_style_settings_screen.dart';
@@ -138,6 +140,15 @@ class _TradingScreenViewState extends State<TradingScreenView> {
     widget.onTabFocusedStream?.listen((_) {
       if (mounted) {
         _initializeAutoTradingStatus();
+        // 보유종목 강제 최신화: 캐시 우선 로직 보정
+        try {
+          AppDataManager.instance.loadPositions().then((_) async {
+            // Bloc 상태 새로고침 유도
+            if (mounted) {
+              context.read<TradingBloc>().add(RefreshTradingData(stockCode: _selectedStock));
+            }
+          });
+        } catch (_) {}
       }
     });
   }
@@ -156,6 +167,10 @@ class _TradingScreenViewState extends State<TradingScreenView> {
       await _appDataManager.loadTradingData();
       await _appDataManager.loadAllHoldings();
       await _loadWatchlist();
+
+      // 선택된 종목의 데이터 강제 생성 (Firestore에 데이터가 없을 경우)
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+      await _forceRefreshCurrentPrice(_selectedStock, uid);
 
       if (mounted) {
         context.read<TradingBloc>().add(LoadStockData(_selectedStock));
@@ -212,6 +227,22 @@ class _TradingScreenViewState extends State<TradingScreenView> {
         try {
           // 데이터베이스 락 방지를 위해 캐시 우선 새로고침
           await _appDataManager.refreshMarketData();
+
+          // 1) 서버 보유목록 동기화: KIS → Firestore → 캐시
+          try {
+            // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+            print('🔍 [current 보호] TradingScreen에서 API 직접 호출 비활성화');
+            // final apiPositions = await KisUnifiedApiService().getPositionsCompat();
+            // await _appDataManager.holdingsRepository.syncWithApi(apiPositions);
+          } catch (e) {
+            print('⚠️ 보유목록 동기화 실패(KIS→Firestore): $e');
+          }
+
+          // 보유종목 강제 최신화: Firestore → 캐시 동기화 후 Bloc 리프레시
+          await AppDataManager.instance.loadPositions();
+          if (mounted) {
+            context.read<TradingBloc>().add(RefreshTradingData(stockCode: _selectedStock));
+          }
         } catch (e) {
           print('❌ 자동 새로고침 실패: $e');
         } finally {
@@ -220,36 +251,16 @@ class _TradingScreenViewState extends State<TradingScreenView> {
       }
     });
 
-    // 현재가 10초 보장 트리거 (관심/보유/현재 보고있는 종목)
+    // 현재가 10초 보장 트리거 (Firestore 구독으로 대체)
     _priceEnsureTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
-      try {
-        final uid = FirebaseAuth.instance.currentUser?.uid;
-        if (uid == null) return;
-        final symbols = await _collectSymbols();
-        symbols.add(_selectedStock);
-        
-        for (final code in symbols) {
-          // 강제로 최신 데이터 조회 (캐시 무시)
-          await _forceRefreshCurrentPrice(code, uid);
-        }
-      } catch (e) {
-        print('⚠️ 10초 현재가 보장 트리거 실패: $e');
-      }
+      // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+      print('🔄 현재가 보장 트리거 비활성화 - Firestore 구독 사용');
     });
 
-    // 차트 30분 보장 트리거 (관심/보유/현재 보고있는 종목)
+    // 차트 30분 보장 트리거 (Firestore 구독으로 대체)
     _chartEnsureTimer = Timer.periodic(const Duration(minutes: 30), (timer) async {
-      try {
-        final uid = FirebaseAuth.instance.currentUser?.uid;
-        if (uid == null) return;
-        final symbols = await _collectSymbols();
-        symbols.add(_selectedStock);
-        for (final code in symbols) {
-          await UnifiedStockService.instance.getDailyChart(code, uid: uid); // 통일된 서비스 사용
-        }
-      } catch (e) {
-        print('⚠️ 30분 차트 보장 트리거 실패: $e');
-      }
+      // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+      print('🔄 차트 보장 트리거 비활성화 - Firestore 구독 사용');
     });
   }
 
@@ -270,44 +281,71 @@ class _TradingScreenViewState extends State<TradingScreenView> {
     return set;
   }
 
-  /// 강제 최신 데이터 조회 (캐시 무시)
+  /// 강제 최신 데이터 조회 (Firestore 단일 소스, 0으로 덮어쓰기 방지)
   Future<void> _forceRefreshCurrentPrice(String stockCode, String uid) async {
     try {
-      print('🔄 강제 현재가 조회 시작: $stockCode');
-      
-      // 1. 실시간 현재가 조회 (가격 정보)
-      final priceData = await RemoteKisService.instance.getCurrentPrice(stockCode, uid: uid);
-      
-      if (priceData != null && priceData.isNotEmpty) {
-        // 2. 거래량 우선순위: tvol (총 거래량) > 차트 데이터 > acml_vol (누적 거래량)
-        final tvol = _toInt(priceData['tvol']);
-        final chartVolume = await _getLatestVolumeFromChart(stockCode);
-        final acmlVol = _toInt(priceData['acml_vol']);
+      print('🔄 [거래탭] Firestore 기반 강제 최신화: $stockCode');
+
+      // 1) 서버에 데이터 보장 요청(차트/현재가/분석 저장) → 앱은 Firestore만 읽음
+      print('🔍 [거래탭] ensureChartAndAnalyze 호출 시작: $stockCode');
+      final result = await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
+      print('🔍 [거래탭] ensureChartAndAnalyze 결과: $result');
+
+      // 2) 쓰기 전파 대기(최대 4회, 500ms 간격)
+      Map<String, dynamic>? stockDoc;
+      for (int i = 0; i < 4; i++) {
+        print('🔍 [거래탭] Firestore 데이터 확인 시도 ${i + 1}/4: $stockCode');
+        stockDoc = await FirestoreStockService.getStockData(stockCode);
+        print('🔍 [거래탭] Firestore 데이터: $stockDoc');
         
-        // tvol이 있으면 우선 사용, 없으면 차트 데이터, 마지막으로 acml_vol
-        final volume = tvol > 0 ? tvol : (chartVolume > 0 ? chartVolume.toInt() : acmlVol);
+        final hasCurrent = stockDoc != null &&
+            (stockDoc['current'] as Map<String, dynamic>?)?.isNotEmpty == true &&
+            (stockDoc!['current']['currentPrice'] != null);
+        print('🔍 [거래탭] hasCurrent: $hasCurrent');
         
-        // 3. 통합 데이터 생성 (가격 + 거래량)
-        final integratedData = {
-          ...priceData,
-          'volume': volume, // 우선순위에 따른 거래량 사용
-        };
-        
-        print('🔍 [거래탭] 거래량 데이터: tvol=$tvol, 차트=$chartVolume, acml_vol=$acmlVol, 최종=$volume');
-        
-        // 4. 캐시 강제 업데이트
-        _appDataManager.updateCurrentPrice(stockCode, integratedData);
-        
-        // 5. UI 상태 업데이트 (거래탭에서만)
-        if (mounted && stockCode == _selectedStock) {
-          setState(() {
-            // UI 강제 업데이트
-          });
+        if (hasCurrent) {
+          print('✅ [거래탭] Firestore 데이터 확인 성공: $stockCode');
+          break;
         }
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+
+      if (stockDoc != null && stockDoc.isNotEmpty) {
+        final current = (stockDoc['current'] as Map<String, dynamic>?) ?? {};
         
-        print('📊 강제 현재가 업데이트 완료: $stockCode (거래량: $chartVolume)');
+        // 0으로 덮어쓰기 방지: 유효한 데이터만 업데이트
+        final currentPrice = _toDouble(current['currentPrice']);
+        final prevClose = _toDouble(current['prevClose']);
+        final open = _toDouble(current['open']);
+        final high = _toDouble(current['high']);
+        final low = _toDouble(current['low']);
+        
+        // 유효한 데이터가 있을 때만 업데이트
+        if (currentPrice > 0 || prevClose > 0 || open > 0 || high > 0 || low > 0) {
+          // 거래량 우선순위: current.tvol > 차트 > current.acml_vol
+          final tvol = _toInt(current['tvol']);
+          final chartVolume = await _getLatestVolumeFromChart(stockCode);
+          final acmlVol = _toInt(current['acml_vol']);
+          final volume = tvol > 0 ? tvol : (chartVolume > 0 ? chartVolume.toInt() : acmlVol);
+
+          // 🔄 거래량 덮어쓰기 방지 - volume 제외하고 업데이트
+          final integratedData = {
+            ...current,
+            // 'volume': volume,  // ← 거래량 덮어쓰기 방지
+          };
+
+          _appDataManager.updateCurrentPrice(stockCode, integratedData);
+
+          if (mounted && stockCode == _selectedStock) {
+            setState(() {});
+          }
+
+          print('📊 [거래탭] Firestore 현재가 반영 완료: $stockCode (vol=$volume)');
+        } else {
+          print('⚠️ [거래탭] 유효하지 않은 데이터, 기존 데이터 유지: $stockCode');
+        }
       } else {
-        print('⚠️ 강제 현재가 조회 실패: $stockCode - 데이터 없음');
+        print('⚠️ [거래탭] Firestore 문서 없음 또는 current 비어있음: $stockCode');
       }
     } catch (e) {
       print('❌ 강제 현재가 업데이트 실패: $stockCode - $e');
@@ -323,13 +361,25 @@ class _TradingScreenViewState extends State<TradingScreenView> {
     return 0;
   }
 
-  /// 차트 데이터에서 최신 거래일 거래량 조회
+  /// 안전한 실수 변환
+  double _toDouble(dynamic value) {
+    if (value == null) return 0.0;
+    if (value is int) return value.toDouble();
+    if (value is double) return value;
+    if (value is String) {
+      return double.tryParse(value) ?? 0.0;
+    }
+    return 0.0;
+  }
+
+  /// 차트 데이터에서 최신 거래일 거래량 조회 (stocks/{symbol}/chart)
   Future<double> _getLatestVolumeFromChart(String stockCode) async {
     try {
+      // 최신 데이터부터 조회 (descending: true)
       final snapshot = await FirebaseFirestore.instance
-          .collection('charts')
+          .collection('stocks')
           .doc(stockCode)
-          .collection('daily')
+          .collection('chart')
           .orderBy('date_ts', descending: true)
           .limit(1)
           .get();
@@ -338,15 +388,16 @@ class _TradingScreenViewState extends State<TradingScreenView> {
         final latestData = snapshot.docs.first.data();
         final volume = (latestData['volume'] as num?)?.toDouble() ?? 0.0;
         final date = latestData['date'] ?? '';
+        final dateTs = latestData['date_ts'] ?? 0;
         
-        print('📊 최신 거래일 거래량: $date - $volume');
+        print('📊 [TradingScreen] 최신 거래일 거래량: $date ($dateTs) - $volume주');
         return volume;
       } else {
-        print('⚠️ 차트 데이터 없음: $stockCode');
+        print('⚠️ [TradingScreen] 차트 데이터 없음: $stockCode');
         return 0.0;
       }
     } catch (e) {
-      print('❌ 차트 데이터 조회 실패: $stockCode - $e');
+      print('❌ [TradingScreen] 차트 데이터 조회 실패: $stockCode - $e');
       return 0.0;
     }
   }
@@ -423,11 +474,28 @@ class _TradingScreenViewState extends State<TradingScreenView> {
     showDialog(
       context: context,
       builder: (context) => StockSelectionDialog(
-        onStockSelected: (stockCode, stockName) {
+        onStockSelected: (stockCode, stockName) async {
           setState(() {
             _selectedStockCode = stockCode;
             _selectedStockName = stockName;
           });
+          
+          // 🔍 종목 선택 시 stocks/{symbol} 문서 자동 생성
+          print('🔄 [종목선택] stocks/{symbol} 문서 자동 생성 시작: $stockCode');
+          try {
+            final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+            final result = await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
+            print('🔍 [종목선택] ensureChartAndAnalyze 결과: $result');
+            
+            if (result) {
+              print('✅ [종목선택] stocks/{symbol} 문서 생성 성공: $stockCode');
+            } else {
+              print('⚠️ [종목선택] stocks/{symbol} 문서 생성 실패: $stockCode');
+            }
+          } catch (e) {
+            print('❌ [종목선택] stocks/{symbol} 문서 생성 오류: $stockCode - $e');
+          }
+          
           context.read<TradingBloc>().add(LoadStockData(stockCode));
         },
       ),
@@ -450,11 +518,28 @@ class _TradingScreenViewState extends State<TradingScreenView> {
           }
           await _loadWatchlist();
         },
-        onStockSelected: (stockCode, stockName) {
+        onStockSelected: (stockCode, stockName) async {
           setState(() {
             _selectedStockCode = stockCode;
             _selectedStockName = stockName;
           });
+          
+          // 🔍 관심종목 선택 시 stocks/{symbol} 문서 자동 생성
+          print('🔄 [관심종목선택] stocks/{symbol} 문서 자동 생성 시작: $stockCode');
+          try {
+            final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+            final result = await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
+            print('🔍 [관심종목선택] ensureChartAndAnalyze 결과: $result');
+            
+            if (result) {
+              print('✅ [관심종목선택] stocks/{symbol} 문서 생성 성공: $stockCode');
+            } else {
+              print('⚠️ [관심종목선택] stocks/{symbol} 문서 생성 실패: $stockCode');
+            }
+          } catch (e) {
+            print('❌ [관심종목선택] stocks/{symbol} 문서 생성 오류: $stockCode - $e');
+          }
+          
           context.read<TradingBloc>().add(LoadStockData(stockCode));
         },
       ),

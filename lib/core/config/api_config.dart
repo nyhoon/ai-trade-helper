@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../database/database_helper.dart';
 
 /// API 설정 관리 클래스
@@ -29,24 +31,31 @@ class ApiConfig {
     try {
       print('🔍 API 설정 초기화 시작...');
       
-      // 1) SQLite에서 로드 시도 (단일 출처)
-      final db = await DatabaseHelper.instance.database;
-      final rows = await db.query('api_config', limit: 1);
-      if (rows.isNotEmpty) {
-        final row = rows.first;
-        _appKey = row['app_key'] as String?;
-        _appSecret = row['app_secret'] as String?;
-        _accountNo = row['account_no'] as String?;
-        _isReal = (row['is_real'] as int? ?? 1) == 1;
-        _autoTradingEnabled = (row['auto_trading_enabled'] as int? ?? 0) == 1;
+      // 1) Firestore에서 로드 시도 (최우선)
+      await _loadFromFirestore();
+      
+      // 2) Firestore에서 로드 실패 시 SQLite에서 로드
+      if (_appKey == null || _appSecret == null || _accountNo == null) {
+        print('⚠️ Firestore에서 API 설정 로드 실패 - SQLite에서 로드 시도...');
+        final db = await DatabaseHelper.instance.database;
+        final rows = await db.query('api_config', limit: 1);
+        if (rows.isNotEmpty) {
+          final row = rows.first;
+          _appKey = row['app_key'] as String?;
+          _appSecret = row['app_secret'] as String?;
+          _accountNo = row['account_no'] as String?;
+          _isReal = (row['is_real'] as int? ?? 1) == 1;
+          _autoTradingEnabled = (row['auto_trading_enabled'] as int? ?? 0) == 1;
+        }
       }
       
-      // 2) 이전 버전 SharedPreferences → SQLite 마이그레이션
+      // 3) 이전 버전 SharedPreferences → SQLite 마이그레이션
       if (_appKey == null || _appSecret == null || _accountNo == null) {
         await _loadFromSharedPreferences();
         if (_appKey != null && _appSecret != null && _accountNo != null &&
             _appKey!.isNotEmpty && _appSecret!.isNotEmpty && _accountNo!.isNotEmpty) {
           // SQLite에 업서트
+          final db = await DatabaseHelper.instance.database;
           final now = DateTime.now().millisecondsSinceEpoch;
           await db.insert(
             'api_config',
@@ -96,6 +105,73 @@ class ApiConfig {
       print('❌ API 설정 초기화 실패: $e');
       // 오류 발생 시 기본값 사용
       await _loadDefaultConfig();
+    }
+  }
+
+  /// Firestore에서 API 설정 로드
+  Future<void> _loadFromFirestore() async {
+    try {
+      print('🔍 Firestore에서 API 설정 로드 시작...');
+      
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid == null) {
+        print('⚠️ 사용자 인증되지 않음 - Firestore 로드 건너뜀');
+        return;
+      }
+      
+      final doc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .collection('settings')
+          .doc('api')
+          .get();
+      
+      if (doc.exists) {
+        final data = doc.data()!;
+        _appKey = data['appKey'] as String?;
+        _appSecret = data['appSecret'] as String?;
+        _accountNo = data['accountNo'] as String?;
+        
+        if (_appKey != null && _appSecret != null && _accountNo != null) {
+          print('✅ Firestore에서 API 설정 로드 완료');
+          print('🔑 AppKey: ${_appKey!.substring(0, _appKey!.length > 10 ? 10 : _appKey!.length)}...');
+          print('📝 AccountNo: $_accountNo');
+          
+          // SQLite에도 동기화 저장
+          await _saveToSQLite();
+        } else {
+          print('⚠️ Firestore API 설정 불완전: appKey=$_appKey, accountNo=$_accountNo');
+        }
+      } else {
+        print('⚠️ Firestore API 설정 문서 없음');
+      }
+    } catch (e) {
+      print('❌ Firestore에서 API 설정 로드 실패: $e');
+    }
+  }
+
+  /// SQLite에 API 설정 저장
+  Future<void> _saveToSQLite() async {
+    try {
+      if (_appKey != null && _appSecret != null && _accountNo != null) {
+        final db = await DatabaseHelper.instance.database;
+        await db.insert(
+          'api_config',
+          {
+            'id': 1,
+            'app_key': _appKey,
+            'app_secret': _appSecret,
+            'account_no': _accountNo,
+            'is_real': _isReal ? 1 : 0,
+            'auto_trading_enabled': _autoTradingEnabled ? 1 : 0,
+            'updated_at': DateTime.now().millisecondsSinceEpoch,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        print('✅ SQLite에 API 설정 동기화 저장 완료');
+      }
+    } catch (e) {
+      print('❌ SQLite API 설정 저장 실패: $e');
     }
   }
 

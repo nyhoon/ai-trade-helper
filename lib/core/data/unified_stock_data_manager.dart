@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'package:sqflite/sqflite.dart';
-import '../remote/remote_kis_service.dart';
+import '../api/unified_stock_service.dart';
 import '../database/repositories/watchlist_repository.dart';
 import '../database/repositories/holdings_repository.dart';
 import '../database/repositories/realtime_data_repository.dart';
@@ -58,67 +58,22 @@ class UnifiedStockDataManager {
     }
   }
 
-  /// 백그라운드 업데이트 시작
+  /// 백그라운드 업데이트 시작 (Firestore 구독으로 대체)
   void _startBackgroundUpdate() {
-    _backgroundUpdateTimer?.cancel();
-    _backgroundUpdateTimer = Timer.periodic(_backgroundUpdateInterval, (timer) {
-      _performBackgroundUpdate();
-    });
-    print('🔄 백그라운드 업데이트 시작 (1분 간격)');
+    // Firestore 구독으로 대체되므로 백그라운드 API 호출 비활성화
+    print('🔄 백그라운드 업데이트 비활성화 - Firestore 구독 사용');
   }
 
-  /// 백그라운드 업데이트 수행
+  /// 백그라운드 업데이트 수행 (Firestore 구독으로 대체)
   Future<void> _performBackgroundUpdate() async {
-    try {
-      print('🔄 백그라운드 업데이트 시작');
-      
-      // 1. 관심종목 현재가 업데이트
-      final watchlist = await _watchlistRepo.getWatchlist();
-      for (final item in watchlist) {
-        final stockCode = item['stock_code'] as String? ?? '';
-        if (stockCode.isNotEmpty) {
-          await _updateCurrentPriceInBackground(stockCode);
-        }
-      }
-      
-      // 2. 보유종목 현재가 업데이트
-      final holdings = await _holdingsRepo.getAllHoldings();
-      for (final item in holdings) {
-        final stockCode = item['stockCode'] as String? ?? '';
-        if (stockCode.isNotEmpty) {
-          await _updateCurrentPriceInBackground(stockCode);
-        }
-      }
-      
-      print('✅ 백그라운드 업데이트 완료');
-    } catch (e) {
-      print('❌ 백그라운드 업데이트 실패: $e');
-    }
+    // Firestore 구독으로 대체되므로 백그라운드 API 호출 비활성화
+    print('🔄 백그라운드 업데이트 비활성화 - Firestore 구독 사용');
   }
 
-  /// 백그라운드에서 현재가 업데이트
+  /// 백그라운드에서 현재가 업데이트 (Firestore 구독으로 대체)
   Future<void> _updateCurrentPriceInBackground(String stockCode) async {
-    try {
-      // API에서 현재가 조회
-      final Map<String, dynamic>? apiData = await RemoteKisService.instance.getCurrentPrice(stockCode);
-
-      if (apiData != null && apiData.isNotEmpty) {
-        // 로컬 DB에 저장
-        await _saveCurrentPriceToDatabase(stockCode, apiData);
-        
-        // 캐시 업데이트
-        final priceData = _convertApiDataToPriceData(apiData);
-        if (_stockDataCache.containsKey(stockCode)) {
-          _stockDataCache[stockCode]!['currentPriceData'] = priceData;
-          _stockDataCache[stockCode]!['lastUpdate'] = DateTime.now();
-        }
-        _cacheTimestamps[stockCode] = DateTime.now();
-        
-        print('✅ 백그라운드 현재가 업데이트: $stockCode');
-      }
-    } catch (e) {
-      print('⚠️ 백그라운드 현재가 업데이트 실패 ($stockCode): $e');
-    }
+    // Firestore 구독으로 대체되므로 백그라운드 API 호출 비활성화
+    print('🔄 백그라운드 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
   }
 
   /// 관심종목 데이터 로드
@@ -127,6 +82,7 @@ class UnifiedStockDataManager {
       print('📊 관심종목 데이터 로드 시작');
       
       final watchlist = await _watchlistRepo.getWatchlist();
+      
       final enrichedData = <Map<String, dynamic>>[];
       
       for (final item in watchlist) {
@@ -154,7 +110,8 @@ class UnifiedStockDataManager {
       final enrichedData = <Map<String, dynamic>>[];
       
       for (final item in holdings) {
-        final stockCode = item['stockCode'] as String? ?? '';
+        final stockCode =
+            item['stockCode'] as String? ?? item['stock_code'] as String? ?? item['pdno'] as String? ?? '';
         if (stockCode.isNotEmpty) {
           final enrichedItem = await _enrichStockData(item);
           enrichedData.add(enrichedItem);
@@ -171,7 +128,8 @@ class UnifiedStockDataManager {
 
   /// 종목 데이터 보강 (현재가, 차트, 분석 데이터 추가)
   Future<Map<String, dynamic>> _enrichStockData(Map<String, dynamic> item) async {
-    final stockCode = item['stock_code'] as String? ?? item['stockCode'] as String? ?? '';
+    final stockCode =
+        item['stock_code'] as String? ?? item['stockCode'] as String? ?? item['pdno'] as String? ?? '';
     
     try {
       // 1. 현재가 데이터 가져오기
@@ -206,7 +164,9 @@ class UnifiedStockDataManager {
       print('🔍 현재가 데이터 조회 시작: $stockCode');
       
       // 1. 항상 API에서 최신 데이터 조회 (분석탭 진입 시)
-      Map<String, dynamic>? apiData = await RemoteKisService.instance.getCurrentPrice(stockCode);
+      // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+      print('📊 [UnifiedStockDataManager] 현재가 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+      Map<String, dynamic>? apiData = null;
 
       if (apiData != null && apiData.isNotEmpty) {
         print('✅ API 데이터 조회 성공: $stockCode');
@@ -232,11 +192,30 @@ class UnifiedStockDataManager {
         return _convertDbDataToPriceData(dbData);
       }
 
-      // 5. 기본 데이터 반환
+      // 5. 캐시된 데이터 사용 (0으로 덮어쓰기 방지)
+      if (_stockDataCache.containsKey(stockCode)) {
+        final cachedData = _stockDataCache[stockCode]!['currentPriceData'] as Map<String, dynamic>?;
+        if (cachedData != null && cachedData.isNotEmpty) {
+          print('⚠️ 캐시된 데이터 사용: $stockCode');
+          return cachedData;
+        }
+      }
+
+      // 6. 마지막 수단: 기본 데이터 반환 (하지만 0으로 덮어쓰지 않음)
       print('⚠️ 모든 데이터 없음, 기본값 사용: $stockCode');
       return _getDefaultPriceData();
     } catch (e) {
       print('❌ 현재가 데이터 가져오기 실패 ($stockCode): $e');
+      
+      // 에러 시에도 캐시된 데이터 우선 사용
+      if (_stockDataCache.containsKey(stockCode)) {
+        final cachedData = _stockDataCache[stockCode]!['currentPriceData'] as Map<String, dynamic>?;
+        if (cachedData != null && cachedData.isNotEmpty) {
+          print('⚠️ 에러 시 캐시된 데이터 사용: $stockCode');
+          return cachedData;
+        }
+      }
+      
       return _getDefaultPriceData();
     }
   }
@@ -248,10 +227,9 @@ class UnifiedStockDataManager {
       
       // 1. 항상 API에서 최신 차트 데이터 조회 (분석탭 진입 시)
       // 통합 API 사용으로 자동 시장 판별 및 적절한 exchangeCode 선택
-      List<Map<String, dynamic>> apiData = await RemoteKisService.instance.getDailyChart(
-        stockCode,
-        days: 100,
-      );
+      // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+      print('📊 [UnifiedStockDataManager] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+      List<Map<String, dynamic>> apiData = <Map<String, dynamic>>[];
 
       if (apiData.isNotEmpty) {
         print('✅ 차트 데이터 조회 성공: $stockCode (${apiData.length}개)');

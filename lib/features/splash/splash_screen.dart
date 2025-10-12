@@ -18,6 +18,7 @@ import '../../core/services/integrated_monitoring_service.dart';
 import '../../core/services/performance_monitor.dart';
 import '../../core/testing/integrated_test_system.dart';
 import '../../core/remote/remote_kis_service.dart';
+import '../../core/data/firestore_stock_service.dart';
 import '../../core/remote/analysis_functions_service.dart';
 import '../../core/trading/market_time_validator.dart';
 import '../../core/api/kis_unified_api_service.dart';
@@ -190,16 +191,17 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
       }
       print('✅ API 설정 확인 완료');
 
-      // KIS 통일 API 클라이언트 즉시 초기화(로컬 호출 경로 사용부 대비)
+      // 🔍 KIS API 클라이언트 초기화 (보유종목 조회용)
       try {
+        // ✅ API 키 설정은 필요 (데이터 조회가 아닌 설정)
         await KisUnifiedApiService().initialize(
           appKey: ApiConfig.instance.appKey!,
           appSecret: ApiConfig.instance.appSecret!,
           accountNumber: ApiConfig.instance.accountNo!,
         );
-        print('✅ KIS 통일 API 클라이언트 초기화 완료');
+        print('✅ KIS API 클라이언트 초기화 완료 (보유종목 조회용)');
       } catch (e) {
-        print('❌ KIS 통일 API 클라이언트 초기화 실패: $e');
+        print('❌ KIS API 클라이언트 초기화 실패: $e');
       }
 
       // 5) 관심종목 및 보유종목 데이터 로딩 (API 설정 후)
@@ -757,19 +759,30 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
         
         // 2. 현재가 데이터 강제 최신화 (통일된 서비스 사용)
         print('🔄 $stockCode 현재가 데이터 강제 최신화 시도...');
-        final price = await UnifiedStockService.instance.getCurrentPrice(stockCode, uid: uid);
+        // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+        print('📊 [스플래시] 직접 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+        final price = null;
         
         if (price != null && price['currentPrice'] != null) {
           print('✅ $stockCode 데이터 최신화 성공: ${price['currentPrice']}');
           break;
         }
         
-        // 3. 서버 실패 시 클라이언트 직접 호출 (통일된 서비스 사용)
-        print('⚠️ $stockCode 서버 실패 → 클라이언트 직접 호출...');
-        final clientPrice = await UnifiedStockService.instance.getCurrentPrice(stockCode);
-        if (clientPrice != null) {
-          print('✅ $stockCode 클라이언트 직접 호출 성공: ${clientPrice['currentPrice']}');
-          break;
+        // 3. 서버 실패 시 Firestore에서 데이터 확인
+        print('⚠️ $stockCode 서버 실패 → Firestore에서 데이터 확인...');
+        try {
+          // Firestore에서 직접 데이터 조회
+          final firestoreData = await FirestoreStockService.getStockData(stockCode);
+          if (firestoreData != null && firestoreData['current'] != null) {
+            final current = firestoreData['current'] as Map<String, dynamic>;
+            final currentPrice = current['currentPrice'] as num?;
+            if (currentPrice != null && currentPrice > 0) {
+              print('✅ $stockCode Firestore에서 데이터 확인: $currentPrice');
+              break;
+            }
+          }
+        } catch (firestoreError) {
+          print('❌ $stockCode Firestore 조회 실패: $firestoreError');
         }
         
         throw Exception('no price from server and client');
@@ -789,7 +802,9 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
   Future<Map<String, dynamic>?> _fetchPriceDirectly(String stockCode, String market) async {
     try {
       // 통일된 서비스 사용
-      final result = await UnifiedStockService.instance.getCurrentPrice(stockCode);
+      // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+      print('📊 [스플래시] 직접 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+      final result = null;
       if (result != null && result['currentPrice'] != null) {
         print('✅ 통일된 서비스 직접 호출 성공: $stockCode');
         return result;
@@ -812,7 +827,9 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
         await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
         
         // 2. 클라이언트에서 직접 거래량 조회 (통일된 서비스 사용)
-        final result = await UnifiedStockService.instance.getCurrentPrice(stockCode);
+        // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+      print('📊 [스플래시] 직접 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+      final result = null;
         
         if (result != null && result['volume'] != null && result['volume'] > 0) {
           print('✅ $stockCode 거래량 갱신 성공: ${result['volume']}');

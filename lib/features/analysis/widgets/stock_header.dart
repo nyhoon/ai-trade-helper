@@ -35,8 +35,13 @@ class StockHeader extends StatelessWidget {
       return double.tryParse(v.toString()) ?? 0.0;
     }
 
-    // 현재가 소스 우선순위: item.currentPriceData → 전달된 currentPriceData → analysis.currentPriceData → analysis.priceData → analysis.technicalData → {}
+    // 🔍 current 필드 우선 읽기 (Functions에서 저장하는 구조)
+    final Map<String, dynamic> currentData = (item['current'] as Map<String, dynamic>?) ?? {};
+    print('🔍 [StockHeader] currentData: $currentData');
+    
+    // 현재가 소스 우선순위: current 필드 → item.currentPriceData → 전달된 currentPriceData → analysis.currentPriceData → analysis.priceData → analysis.technicalData → {}
     final Map<String, dynamic> priceMap = Map<String, dynamic>.from(
+      currentData.isNotEmpty ? currentData :
       (item['currentPriceData'] as Map?) ??
       (currentPriceData as Map?) ??
       (analysis?['currentPriceData'] as Map?) ??
@@ -45,26 +50,68 @@ class StockHeader extends StatelessWidget {
       const {}
     );
 
-    final double currentPrice = _toDouble(
+    double currentPrice = _toDouble(
       priceMap['currentPrice'] ?? priceMap['current_price'] ?? priceMap['prpr']
     );
-    final double openPrice = _toDouble(
+    double openPrice = _toDouble(
       priceMap['open'] ?? priceMap['openPrice'] ?? priceMap['open_price']
     );
     double prevClose = _toDouble(
       priceMap['prevClose'] ?? priceMap['prev_close'] ?? priceMap['previous_close'] ?? priceMap['stck_prdy_clpr']
     );
+
+    // 추가 폴백: 서버/분석 루트 및 아이템 루트 키에서 보강
+    if (currentPrice <= 0.0) {
+      currentPrice = _toDouble(
+        (analysis?['currentPrice']) ??
+        (analysis?['priceData']?['currentPrice']) ??
+        (analysis?['technicalData']?['currentPrice']) ??
+        (item['currentPrice']) ?? (item['prpr']) ??
+        (currentPriceData?['currentPrice'])
+      );
+    }
+    if (openPrice <= 0.0) {
+      openPrice = _toDouble(
+        (analysis?['openPrice']) ??
+        (analysis?['priceData']?['openPrice']) ??
+        (analysis?['technicalData']?['openPrice']) ??
+        (item['open']) ?? (item['openPrice']) ??
+        (currentPriceData?['openPrice'])
+      );
+    }
     // 추가 폴백: 분석 블록에서 전일가 추출
     if (prevClose == 0.0) {
       prevClose = _toDouble(
-        (analysis?['prevClose']) ?? (analysis?['previousPrice']) ?? (analysis?['technicalData']?['previousPrice'])
+        (analysis?['prevClose']) ?? (analysis?['previousPrice']) ??
+        (analysis?['priceData']?['prevClose']) ??
+        (analysis?['technicalData']?['previousPrice']) ??
+        (item['prevClose']) ?? (item['stck_prdy_clpr']) ??
+        (currentPriceData?['prevClose'])
       );
     }
 
-    // 등락 기준: 시가 우선, 없으면 전일가
-    final double baseline = openPrice > 0 ? openPrice : prevClose;
+    // 최후 폴백: priceHistory 마지막 종가 사용
+    if (currentPrice <= 0.0) {
+      final List<dynamic>? prices = (analysis?['technicalData']?['priceHistory'] as List?) ??
+          (analysis?['priceHistory'] as List?);
+      if (prices != null && prices.isNotEmpty) {
+        currentPrice = _toDouble(prices.last);
+      }
+    }
+
+    // 등락 기준: 전일 종가 기준 (올바른 계산)
+    final double baseline = prevClose > 0 ? prevClose : (openPrice > 0 ? openPrice : currentPrice);
     final double priceChangeFromBaseline = currentPrice - baseline;
     final double priceChangePercent = baseline > 0 ? (priceChangeFromBaseline / baseline) * 100 : 0.0;
+    
+    // 디버그 로깅 추가
+    print('🔍 [StockHeader] 가격 계산: $stockCode');
+    print('  - 현재가: $currentPrice');
+    print('  - 전일가: $prevClose');
+    print('  - 시가: $openPrice');
+    print('  - 기준가: $baseline');
+    print('  - 변동액: $priceChangeFromBaseline');
+    print('  - 변동률: $priceChangePercent%');
 
     final bool nasdaq = isNasdaqStock(stockCode);
 

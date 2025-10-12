@@ -631,8 +631,11 @@ class LocalNotificationManager {
       if (dbPrev > 0) return dbPrev;
 
       try {
-        final kis = KisUnifiedApiService();
-        final Map<String, dynamic>? api = await kis.getStockPrice(stockCode);
+        // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+        print('🔍 [current 보호] LocalNotificationManager에서 API 직접 호출 비활성화');
+        // final kis = KisUnifiedApiService();
+        // final Map<String, dynamic>? api = await kis.getStockPrice(stockCode);
+        final Map<String, dynamic>? api = null;
         if (api != null) {
           final apiNow = (api['currentPrice'] as num?)?.toDouble() ?? 0.0;
           final apiPrev = (api['prevClose'] as num?)?.toDouble() ?? 0.0;

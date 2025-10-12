@@ -1,0 +1,27 @@
+﻿2025-10-04T16:56:43.249038Z ? getstockdata: ?좑툘 KIS API ?꾩옱媛 議고쉶 ?ㅽ뙣: 228760 - ?곗씠???놁쓬
+
+2025-10-04T16:56:43.249134Z ? getstockdata: ?㎜ 遺꾩꽍 ?곗씠??怨꾩궛: 228760
+
+2025-10-04T16:56:43.249217Z ? getstockdata: ?좑툘 李⑦듃 ?곗씠??遺議? 228760 (0媛?
+
+2025-10-04T16:56:43.312962Z ? getstockdata: ???듯빀 ?곗씠??????꾨즺: 228760
+
+2025-10-04T16:56:43.313107Z ? getstockdata: ???듯빀 醫낅ぉ ?곗씠??議고쉶 ?꾨즺: 228760
+
+2025-10-04T16:56:43.313200Z ? getstockdata: ???듯빀 醫낅ぉ ?곗씠??議고쉶 ?꾨즺: 228760
+
+2025-10-04T16:56:43.511048Z I ensurechartandanalyze: 
+2025-10-04T16:56:43.654296Z D getstockdata: {"message":"Callable request verification passed","verifications":{"app":"MISSING","auth":"VALID"}}
+2025-10-04T16:56:43.654427Z ? getstockdata: ?좑툘 ?몄쬆?섏? ?딆? ?ъ슜?? ?듬챸 ?ъ슜?먮줈 泥섎━
+
+2025-10-04T16:56:43.654632Z ? getstockdata: ?뱤 ?듯빀 醫낅ぉ ?곗씠??議고쉶 ?붿껌: NVD (uid: EehuAqIQZoXNqRNFGGvaB2yCfq72)
+
+2025-10-04T16:56:43.654711Z ? getstockdata: ?뱤 ?듯빀 醫낅ぉ ?곗씠??議고쉶 ?쒖옉: NVD
+
+2025-10-04T16:56:43.665808Z ? getstockdata: ?뱢 李⑦듃 ?곗씠??議고쉶 ?쒖옉: NVD
+
+2025-10-04T16:56:43.678580Z ? getstockdata: ?봽 KIS ?쇰큺 議고쉶 ?쒕룄: NVD
+
+2025-10-04T16:56:43.678669Z ? getstockdata: ?뵇 KIS 李⑦듃 議고쉶 ?쒖옉: NVD, days=100
+
+2025-10-04T16:56:43.678731Z ? getstockdata: ??[KISProxy] 硫붾え由?罹먯떆???좏겙 ?ъ궗??

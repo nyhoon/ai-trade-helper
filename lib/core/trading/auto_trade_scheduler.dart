@@ -53,7 +53,10 @@ class AutoTradeScheduler {
       try {
         print('📊 $code 가격 조회 중...');
         
-        final quote = await KisUnifiedApiService().getStockPrice(code);
+        // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+        print('🔍 [current 보호] AutoTradeScheduler에서 API 직접 호출 비활성화');
+        // final quote = await KisUnifiedApiService().getStockPrice(code);
+        final quote = null;
         final double price = (quote?['currentPrice'] as num?)?.toDouble() ?? 0.0;
         final String name = (quote?['stockName'] as String?) ?? code;
         final String market = (quote?['market'] as String?) ?? 'UNKNOWN';

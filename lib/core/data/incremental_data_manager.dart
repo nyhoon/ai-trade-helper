@@ -308,8 +308,11 @@ class IncrementalDataManager {
           final stockCode = stock['stock_code'] as String;
           final market = stock['market'] as String;
 
+          // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+          print('🔍 [current 보호] IncrementalDataManager에서 API 직접 호출 비활성화');
           // API에서 현재가 조회 (@api/ 확장 파일의 메서드 사용)
-          final priceData = await _unifiedApiService!.getStockPrice(stockCode);
+          // final priceData = await _unifiedApiService!.getStockPrice(stockCode);
+          final priceData = null;
           
           if (priceData != null) {
             priceDataList.add({
@@ -349,48 +352,52 @@ class IncrementalDataManager {
   /// 현재가 데이터 업데이트
   Future<void> _updateCurrentPriceData(List<Map<String, dynamic>> stocks) async {
     try {
-      if (_unifiedApiService == null) return;
+      // ✅ current 필드 보호: API 직접 호출 비활성화
+      print('🔍 [current 보호] IncrementalDataManager에서 API 직접 호출 비활성화');
+      print('🔍 [current 보호] 기존 current 필드 유지');
+      
+      // if (_unifiedApiService == null) return;
 
-      final priceDataList = <Map<String, dynamic>>[];
+      // final priceDataList = <Map<String, dynamic>>[];
 
-      for (final stock in stocks) {
-        try {
-          final stockCode = stock['stock_code'] as String;
-          final market = stock['market'] as String;
+      // for (final stock in stocks) {
+      //   try {
+      //     final stockCode = stock['stock_code'] as String;
+      //     final market = stock['market'] as String;
 
-          // API에서 현재가 조회 (@api/ 확장 파일의 메서드 사용)
-          final priceData = await _unifiedApiService!.getStockPrice(stockCode);
+      //     // API에서 현재가 조회 (@api/ 확장 파일의 메서드 사용)
+      //     final priceData = await _unifiedApiService!.getStockPrice(stockCode);
           
-          if (priceData != null) {
-            priceDataList.add({
-              'stock_code': stockCode,
-              'market': market,
-              'current_price': priceData['current_price'] ?? 0.0,
-              'prev_close': priceData['prev_close'] ?? 0.0,
-              'change_amount': priceData['change_amount'] ?? 0.0,
-              'change_rate': priceData['change_rate'] ?? 0.0,
-              'volume': priceData['volume'] ?? 0,
-              'trade_amount': priceData['trade_amount'] ?? 0.0,
-              'high_price': priceData['high_price'] ?? 0.0,
-              'low_price': priceData['low_price'] ?? 0.0,
-              'open_price': priceData['open_price'] ?? 0.0,
-              'market_cap': priceData['market_cap'],
-              'per': priceData['per'],
-              'pbr': priceData['pbr'],
-            });
-          }
+      //     if (priceData != null) {
+      //       priceDataList.add({
+      //         'stock_code': stockCode,
+      //         'market': market,
+      //         'current_price': priceData['current_price'] ?? 0.0,
+      //         'prev_close': priceData['prev_close'] ?? 0.0,
+      //         'change_amount': priceData['change_amount'] ?? 0.0,
+      //         'change_rate': priceData['change_rate'] ?? 0.0,
+      //         'volume': priceData['volume'] ?? 0,
+      //         'trade_amount': priceData['trade_amount'] ?? 0.0,
+      //         'high_price': priceData['high_price'] ?? 0.0,
+      //         'low_price': priceData['low_price'] ?? 0.0,
+      //         'open_price': priceData['open_price'] ?? 0.0,
+      //         'market_cap': priceData['market_cap'],
+      //         'per': priceData['per'],
+      //         'pbr': priceData['pbr'],
+      //       });
+      //     }
 
-          // API 호출 제한 방지를 위한 딜레이
-          await Future.delayed(const Duration(milliseconds: 30));
-        } catch (e) {
-          print('⚠️ ${stock['stock_code']} 현재가 업데이트 실패: $e');
-        }
-      }
+      //     // API 호출 제한 방지를 위한 딜레이
+      //     await Future.delayed(const Duration(milliseconds: 30));
+      //   } catch (e) {
+      //     print('⚠️ ${stock['stock_code']} 현재가 업데이트 실패: $e');
+      //   }
+      // }
 
-      if (priceDataList.isNotEmpty) {
-        await _currentPriceRepo.insertMultipleCurrentPrice(priceDataList);
-        print('💰 ${priceDataList.length}개 종목 현재가 업데이트 완료');
-      }
+      // if (priceDataList.isNotEmpty) {
+      //   await _currentPriceRepo.insertMultipleCurrentPrice(priceDataList);
+      //   print('💰 ${priceDataList.length}개 종목 현재가 업데이트 완료');
+      // }
     } catch (e) {
       print('❌ 현재가 데이터 업데이트 실패: $e');
     }

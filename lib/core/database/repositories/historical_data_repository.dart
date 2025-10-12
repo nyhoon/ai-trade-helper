@@ -11,7 +11,7 @@ import '../../constants/chart_constants.dart';
 /// - 새로운 ChartDataRepository 활용
 class HistoricalDataRepository {
   CollectionReference<Map<String, dynamic>> _collection(String stockCode) =>
-      FirebaseFirestore.instance.collection('charts').doc(stockCode).collection('daily');
+      FirebaseFirestore.instance.collection('stocks').doc(stockCode).collection('chart');
   String _formatDate(DateTime d) => '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
   int _dateInt(String yyyyMmDd) => int.parse(yyyyMmDd.replaceAll('-', ''));
 
@@ -45,14 +45,16 @@ class HistoricalDataRepository {
   /// 서버 Functions를 통한 데이터 저장
   Future<void> _saveToServerFunctions(String stockCode, String market, List<Map<String, dynamic>> bars) async {
     try {
-      // Firebase Functions 호출
-      final functions = FirebaseFunctions.instance;
+      // Firebase Functions 호출 (리전 고정)
+      final functions = FirebaseFunctions.instanceFor(region: 'asia-northeast3');
       final callable = functions.httpsCallable('ensureChartAndAnalyze');
       
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
       final result = await callable.call({
         'symbol': stockCode,
         'market': market,
         'bars': bars,
+        'uid': uid,
       });
       
       print('📊 $stockCode 서버 저장 완료: ${result.data}');
@@ -143,7 +145,7 @@ class HistoricalDataRepository {
     try {
       final cutoffTs = _dateInt(_formatDate(before));
       final snap = await FirebaseFirestore.instance
-          .collectionGroup('daily')
+          .collectionGroup('chart')
           .where('date_ts', isLessThan: cutoffTs)
           .get();
       final batch = FirebaseFirestore.instance.batch();

@@ -47,7 +47,9 @@ class LoadHoldingsDataUseCase {
       final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
       for (final symbol in symbols) {
         await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: symbol);
-        final price = await RemoteKisService.instance.getCurrentPrice(symbol, uid: uid);
+        // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+        print('📊 [LoadHoldingsData] 현재가 API 호출 비활성화 - Firestore 구독 사용: $symbol');
+        final price = null;
         if (price != null && price.isNotEmpty) {
           // 표준화
           currentPrices[symbol] = {

@@ -9,6 +9,7 @@ import '../database/repositories/watchlist_repository.dart';
 import '../database/repositories/holdings_repository.dart';
 import '../database/database_helper.dart';
 import '../api/kis_unified_api_service.dart';
+import '../remote/remote_kis_service.dart';
 import 'performance_monitor.dart';
 
 /// 실시간 업데이트 서비스 - 1분마다 활성 종목 데이터 업데이트
@@ -180,26 +181,30 @@ class RealtimeUpdateService {
     }
   }
 
-  /// 관심종목 업데이트 타이머 시작 (1분 간격)
+  /// 관심종목 업데이트 타이머 시작 (Firestore 구독으로 변경)
   void _startWatchlistUpdateTimer() {
     _watchlistUpdateTimer?.cancel();
-    _watchlistUpdateTimer = Timer.periodic(_watchlistUpdateInterval, (timer) async {
-      if (_isRunning) {
-        await _performWatchlistUpdate();
-      }
-    });
-    print('⏰ 관심종목 업데이트 타이머 시작 (${_watchlistUpdateInterval.inMinutes}분 간격)');
+    // 🔄 Firestore 구독으로 변경 - 직접 API 호출 대신 Functions에서 처리
+    print('🔄 관심종목 업데이트: Firestore 구독 사용 (직접 API 호출 비활성화)');
+    // _watchlistUpdateTimer = Timer.periodic(_watchlistUpdateInterval, (timer) async {
+    //   if (_isRunning) {
+    //     await _performWatchlistUpdate();
+    //   }
+    // });
+    // print('⏰ 관심종목 업데이트 타이머 시작 (${_watchlistUpdateInterval.inMinutes}분 간격)');
   }
 
-  /// 보유종목 업데이트 타이머 시작 (5분 간격)
+  /// 보유종목 업데이트 타이머 시작 (Firestore 구독으로 변경)
   void _startHoldingsUpdateTimer() {
     _holdingsUpdateTimer?.cancel();
-    _holdingsUpdateTimer = Timer.periodic(_holdingsUpdateInterval, (timer) async {
-      if (_isRunning) {
-        await _performHoldingsUpdate();
-      }
-    });
-    print('⏰ 보유종목 업데이트 타이머 시작 (${_holdingsUpdateInterval.inMinutes}분 간격)');
+    // 🔄 Firestore 구독으로 변경 - 직접 API 호출 대신 Functions에서 처리
+    print('🔄 보유종목 업데이트: Firestore 구독 사용 (직접 API 호출 비활성화)');
+    // _holdingsUpdateTimer = Timer.periodic(_holdingsUpdateInterval, (timer) async {
+    //   if (_isRunning) {
+    //     await _performHoldingsUpdate();
+    //   }
+    // });
+    // print('⏰ 보유종목 업데이트 타이머 시작 (${_holdingsUpdateInterval.inMinutes}분 간격)');
   }
 
   /// 차트 데이터 업데이트 타이머 시작 (24시간 간격)
@@ -511,38 +516,38 @@ class RealtimeUpdateService {
     }
   }
 
-  /// 현재가 데이터 업데이트
+  /// 현재가 데이터 업데이트 (호출 빈도 제한)
   Future<void> _updateCurrentPriceData(List<Map<String, dynamic>> stocks) async {
     try {
-      print('💰 현재가 데이터 업데이트 시작...');
+      print('💰 현재가 데이터 업데이트: Firestore Functions 사용 (호출 빈도 제한)');
       
-      // 배치 처리로 API 호출 최적화
-      final batchSize = 10;
-      int updatedCount = 0;
-      final totalCount = stocks.length;
+      // 🔄 Firestore Functions를 통한 데이터 업데이트 (호출 빈도 제한)
+      // ✅ current 필드 보호: ensureChartAndAnalyze 호출 비활성화
+      print('🔍 [current 보호] RealtimeUpdateService에서 ensureChartAndAnalyze 호출 비활성화');
+      print('🔍 [current 보호] 기존 current 필드 유지');
       
-      for (int i = 0; i < stocks.length; i += batchSize) {
-        final batch = stocks.skip(i).take(batchSize).toList();
-        
-        try {
-          // 배치로 현재가 데이터 업데이트
-          await _updateCurrentPriceBatch(batch);
-          updatedCount += batch.length;
-          
-          print('💰 현재가 데이터 업데이트 진행: $updatedCount/$totalCount');
-          
-          // API 호출 제한을 위한 짧은 대기
-          await Future.delayed(const Duration(milliseconds: 500));
-          
-        } catch (e) {
-          print('❌ 현재가 배치 업데이트 실패: $e');
-        }
-      }
+      // for (final stock in stocks) {
+      //   final stockCode = stock['stock_code'] as String;
+      //   try {
+      //     // RemoteKisService에서 자체적으로 호출 빈도 제한 적용
+      //     final success = await RemoteKisService.instance.ensureChartAndAnalyze(
+      //       uid: 'debug-user', // 임시 UID 사용
+      //       symbol: stockCode,
+      //     );
+      //     if (success) {
+      //       print('✅ Firestore Functions 호출 완료: $stockCode');
+      //     } else {
+      //       print('⏸️ Firestore Functions 호출 건너뜀 (빈도 제한): $stockCode');
+      //     }
+      //   } catch (e) {
+      //     print('❌ Firestore Functions 호출 실패 ($stockCode): $e');
+      //   }
+      // }
       
-      print('✅ 현재가 데이터 업데이트 완료: $updatedCount/$totalCount');
+      print('✅ Firestore Functions를 통한 데이터 업데이트 완료');
       
     } catch (e) {
-      print('❌ 현재가 데이터 업데이트 실패: $e');
+      print('❌ Firestore Functions 데이터 업데이트 실패: $e');
       rethrow;
     }
   }

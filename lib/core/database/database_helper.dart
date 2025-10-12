@@ -37,6 +37,8 @@ class DatabaseHelper {
           await db.execute('PRAGMA temp_store=MEMORY;');
           // 캐시 페이지 수(음수: KB 단위), 모바일 메모리 고려해 2MB 수준
           await db.execute('PRAGMA cache_size=-2000;');
+               // 락 타임아웃 설정 (120초로 증가 - 분석탭 동시 처리 대응)
+               await db.execute('PRAGMA busy_timeout = 120000;');
         } catch (e) {
           print('⚠️ PRAGMA 설정 실패: $e');
         }
@@ -823,9 +825,16 @@ class DatabaseHelper {
     return await db.rawQuery(sql, arguments);
   }
 
-  /// 트랜잭션 메서드
+  /// 트랜잭션 메서드 - 락 타임아웃 설정 (분석탭 동시 처리 대응)
   Future<T> transaction<T>(Future<T> Function(Transaction) action) async {
     final db = await database;
-    return await db.transaction(action);
+    try {
+      // 락 타임아웃 설정 (120초로 증가 - 분석탭 동시 처리 대응)
+      await db.execute('PRAGMA busy_timeout = 120000;');
+      return await db.transaction(action);
+    } catch (e) {
+      print('⚠️ 트랜잭션 실행 실패: $e');
+      rethrow;
+    }
   }
 }

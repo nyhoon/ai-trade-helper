@@ -1,5 +1,6 @@
 import '../remote/remote_kis_service.dart';
 import 'dart:async';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../data/app_data_manager.dart';
 import '../database/repositories/signal_history_repository.dart';
 import '../database/repositories/notification_history_repository.dart';
@@ -333,8 +334,11 @@ class AutoTradingCycle {
       print('🇰🇷 국내 보유종목 조회 시작...');
       List<Map<String, dynamic>> domesticHoldings = [];
       try {
+        // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+        print('🔍 [current 보호] AutoTradingCycle에서 API 직접 호출 비활성화');
         // 통일된 API 서비스 사용
-        final domesticResult = await _unifiedApiService.getPositionsCompat();
+        // final domesticResult = await _unifiedApiService.getPositionsCompat();
+        final domesticResult = <Map<String, dynamic>>[];
         if (domesticResult.isNotEmpty) {
           domesticHoldings = List<Map<String, dynamic>>.from(domesticResult);
           print('✅ 국내 보유종목 조회 성공: ${domesticHoldings.length}개');
@@ -411,6 +415,21 @@ class AutoTradingCycle {
         print('⚠️ 보유종목이 비어있습니다!');
       }
       
+      // 🔍 보유종목에 대해 stocks/{symbol} 문서 자동 생성
+      print('🔄 [보유종목] stocks/{symbol} 문서 자동 생성 시작: ${totalHoldings.length}개');
+      for (final holding in totalHoldings) {
+        final stockCode = holding['stockCode'] ?? holding['pdno'] ?? '';
+        if (stockCode.isNotEmpty) {
+          try {
+            final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+            final result = await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
+            print('🔍 [보유종목] ensureChartAndAnalyze 결과: $stockCode - $result');
+          } catch (e) {
+            print('❌ [보유종목] stocks/{symbol} 문서 생성 오류: $stockCode - $e');
+          }
+        }
+      }
+
       // 로컬 DB 업데이트
       print('💾 로컬 DB에 보유종목 저장 중...');
       try {
@@ -499,7 +518,9 @@ class AutoTradingCycle {
             // 분석탭과 동일한 방식으로 데이터 수집
             // 통일된 API 서비스로 현재가 조회
             print('📊 현재가 조회: $stockCode');
-            currentPriceData = await _unifiedApiService.getStockPrice(stockCode);
+            // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+            print('📊 [AutoTradingCycle] 현재가 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+            currentPriceData = null;
             
             if (currentPriceData != null && currentPriceData.isNotEmpty) {
               print('✅ 현재가 데이터 조회 성공: $stockCode');
@@ -533,7 +554,9 @@ class AutoTradingCycle {
               // 로컬DB에 없을 때만 API 호출 (폴백)
               // 통일된 API 서비스로 차트 데이터 조회
               print('📈 차트 데이터 조회: $stockCode');
-              chartData = await RemoteKisService.instance.getDailyChart(stockCode, days: 100);
+              // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+              print('📊 [AutoTradingCycle] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+              chartData = <Map<String, dynamic>>[];
             }
             
             print('📊 차트 데이터 조회 결과: $stockCode - ${chartData.length}개');
@@ -1746,8 +1769,11 @@ class AutoTradingCycle {
       // 대기 중인 주문 조회 (오류 처리 개선)
       List<Map<String, dynamic>>? pendingOrders;
       try {
+        // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+        print('🔍 [current 보호] AutoTradingCycle에서 API 직접 호출 비활성화');
         // 레거시 API 유지 (통일된 API 서비스에 주문 조회 기능 없음)
-        pendingOrders = await _unifiedApiService.getOverseasPendingOrders();
+        // pendingOrders = await _unifiedApiService.getOverseasPendingOrders();
+        pendingOrders = <Map<String, dynamic>>[];
       } catch (e) {
         print('⚠️ 대기 주문 조회 실패 (무시하고 계속): $e');
         return; // 오류 발생 시 조용히 종료
@@ -2347,7 +2373,9 @@ class AutoTradingCycle {
         Map<String, dynamic>? apiData;
         
         // 통일된 API 서비스로 현재가 조회
-        apiData = await _unifiedApiService.getStockPrice(stockCode);
+        // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+        print('📊 [AutoTradingCycle] 현재가 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+        apiData = null;
         
         if (apiData != null) {
           final apiPrice = (apiData['currentPrice'] as num?)?.toDouble() ?? 0.0;

@@ -31,9 +31,9 @@ class HoldingsInfo extends StatelessWidget {
     final currentPrices = getCurrentPrices();
     final currentPriceData = currentPrices[stockCode];
 
-    double currentPrice = currentPriceData?['currentPrice'] ??
-        currentPriceData?['prpr'] ??
-        (holding['currentPrice'] ?? holding['current_price'] ?? 0.0).toDouble();
+    double currentPrice = (currentPriceData?['currentPrice'] as num?)?.toDouble() ??
+        (currentPriceData?['prpr'] as num?)?.toDouble() ??
+        ((holding['currentPrice'] ?? holding['current_price'] ?? 0) as num).toDouble();
 
     final totalValue = currentPrice * quantity;
     final totalCost = avgPrice * quantity;

@@ -157,45 +157,39 @@ void main() async {
           
           bool saved = false;
           
-          // 1. 서버 Functions 시도 (3초 타임아웃)
+          // 1. 클라이언트 직접 저장 (가장 안전한 방법)
+          print('🔄 클라이언트 직접 저장 시도...');
           try {
-            final ok = await CredentialsService.instance.saveApiCredentials(
-              uid: uid,
-              appKey: cfg.appKey ?? '',
-              appSecret: cfg.appSecret ?? '',
-              accountNo: cfg.accountNo ?? '',
-            ).timeout(const Duration(seconds: 3));
-            
-            if (ok) {
-              print('✅ 서버에 API 자격 저장 완료');
-              saved = true;
-            } else {
-              print('❌ 서버 자격 저장 실패');
-            }
+            await FirebaseFirestore.instance
+                .collection('users')
+                .doc(uid)
+                .collection('settings')
+                .doc('api')
+                .set({
+              'appKey': cfg.appKey ?? '',
+              'appSecret': cfg.appSecret ?? '',
+              'accountNo': cfg.accountNo ?? '',
+              'isConfigured': true,
+              'updatedAt': DateTime.now().millisecondsSinceEpoch,
+            }).timeout(const Duration(seconds: 5));
+            print('✅ 클라이언트 직접 API 자격 저장 완료');
+            saved = true;
           } catch (e) {
-            print('❌ 서버 Functions 타임아웃/실패: $e');
+            print('❌ 클라이언트 직접 저장 실패: $e');
           }
           
-          // 2. 서버 실패 시 클라이언트 직접 저장
-          if (!saved) {
-            print('🔄 클라이언트 직접 저장 시도...');
+          // 2. 서버 Functions 시도 (백업, 선택적)
+          if (saved) {
             try {
-              await FirebaseFirestore.instance
-                  .collection('users')
-                  .doc(uid)
-                  .collection('settings')
-                  .doc('api')
-                  .set({
-                'appKey': cfg.appKey ?? '',
-                'appSecret': cfg.appSecret ?? '',
-                'accountNo': cfg.accountNo ?? '',
-                'isConfigured': true,
-                'updatedAt': DateTime.now().millisecondsSinceEpoch,
-              }).timeout(const Duration(seconds: 5));
-              print('✅ 클라이언트 직접 API 자격 저장 완료');
-              saved = true;
+              await CredentialsService.instance.saveApiCredentials(
+                uid: uid,
+                appKey: cfg.appKey ?? '',
+                appSecret: cfg.appSecret ?? '',
+                accountNo: cfg.accountNo ?? '',
+              ).timeout(const Duration(seconds: 3));
+              print('✅ 서버에도 API 자격 저장 완료');
             } catch (e) {
-              print('❌ 클라이언트 직접 저장도 실패: $e');
+              print('⚠️ 서버 Functions 저장 실패 (로컬 저장은 성공): $e');
             }
           }
           

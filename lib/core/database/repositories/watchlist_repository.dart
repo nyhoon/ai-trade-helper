@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../../trading/market_time_validator.dart';
+import '../../remote/remote_kis_service.dart';
 
 /// 관심종목 Repository
 class WatchlistRepository {
@@ -41,6 +42,22 @@ class WatchlistRepository {
         'memo': memo,
         'is_active': 1,
       }, SetOptions(merge: true));
+
+      // 🔍 관심종목 추가 시 stocks/{symbol} 문서 자동 생성
+      print('🔄 [관심종목] stocks/{symbol} 문서 자동 생성 시작: $stockCode');
+      try {
+        final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+        final result = await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
+        print('🔍 [관심종목] ensureChartAndAnalyze 결과: $result');
+        
+        if (result) {
+          print('✅ [관심종목] stocks/{symbol} 문서 생성 성공: $stockCode');
+        } else {
+          print('⚠️ [관심종목] stocks/{symbol} 문서 생성 실패: $stockCode');
+        }
+      } catch (e) {
+        print('❌ [관심종목] stocks/{symbol} 문서 생성 오류: $stockCode - $e');
+      }
 
       print('✅ 관심종목 추가 완료: $stockName ($stockCode)');
       return 1;

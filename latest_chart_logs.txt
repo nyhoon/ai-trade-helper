@@ -1,0 +1,30 @@
+﻿2025-10-07T02:31:11.340467Z ? ensurechartandanalyze: ???꾩옱媛 ?곗씠??????꾨즺: DKNG (currentPrice: 34.98, ?뺢퇋?? false)
+
+2025-10-07T02:31:11.340491Z ? ensurechartandanalyze: ?뱤 3?④퀎: 遺꾩꽍 ?곗씠??怨꾩궛 ?쒖옉 - DKNG
+
+2025-10-07T02:31:11.340517Z ? ensurechartandanalyze: ?㎜ 遺꾩꽍 ?곗씠??怨꾩궛: DKNG
+
+2025-10-07T02:31:11.340551Z ? ensurechartandanalyze: ?좑툘 李⑦듃 ?곗씠??遺議? DKNG (0媛?
+
+2025-10-07T02:31:11.340576Z ? ensurechartandanalyze: ?뱤 3?④퀎 ?꾨즺: 遺꾩꽍 ?곗씠??怨꾩궛 - DKNG
+
+2025-10-07T02:31:11.340605Z ? ensurechartandanalyze: ?뱤 4?④퀎: 遺꾩꽍 ?곗씠??????쒖옉 - DKNG
+
+2025-10-07T02:31:11.342791Z ? ensurechartandanalyze: ???꾩옱媛 ?곗씠??????꾨즺: 228760 (currentPrice: 20750, ?뺢퇋?? false)
+
+2025-10-07T02:31:11.342822Z ? ensurechartandanalyze: ?뱤 3?④퀎: 遺꾩꽍 ?곗씠??怨꾩궛 ?쒖옉 - 228760
+
+2025-10-07T02:31:11.342840Z ? ensurechartandanalyze: ?㎜ 遺꾩꽍 ?곗씠??怨꾩궛: 228760
+
+2025-10-07T02:31:11.342866Z ? ensurechartandanalyze: ?좑툘 李⑦듃 ?곗씠??遺議? 228760 (0媛?
+
+2025-10-07T02:31:11.342897Z ? ensurechartandanalyze: ?뱤 3?④퀎 ?꾨즺: 遺꾩꽍 ?곗씠??怨꾩궛 - 228760
+
+2025-10-07T02:31:11.342916Z ? ensurechartandanalyze: ?뱤 4?④퀎: 遺꾩꽍 ?곗씠??????쒖옉 - 228760
+
+2025-10-07T02:31:11.348917Z ? ensurechartandanalyze: ?뵇 [KISProxy] ?댁쇅二쇱떇 ?꾩옱媛 API ?묐떟 (ASTL): {"output1":{"rsym":"DNASASTL","zdiv":"4","curr":"USD","base":"3.3100","open":"3.3500","high":"3.5900","low":"3.2800","last":"3.5700","dymd":"20251007","dhms":"090000","bvol":"0","avol":"0","bdvl":"0","advl":"0","code":"ASTL","ropen":"+1.21","rhigh":"+8.46","rlow":"-0.91","rclose":"+7.85"},"output2":{"pbid1":"0.0000","pask1":"0.0000","vbid1":"0","vask1":"0","dbid1":"0","dask1":"0"},"output3":{"vstm":"","vetm":"","csbp":"","cshi":"","cslo":"","iep":"","iev":""},"rt_cd":"0","msg_cd":"MCA00000","msg1":"?뺤긽泥섎━ ?섏뿀?듬땲??"}
+
+2025-10-07T02:31:11.348927Z ? ensurechartandanalyze: ?뵇 [KISProxy] output1 keys: rsym, zdiv, curr, base, open, high, low, last, dymd, dhms, bvol, avol, bdvl, advl, code, ropen, rhigh, rlow, rclose
+
+2025-10-07T02:31:11.348974Z ? ensurechartandanalyze: ?뵇 [KISProxy] output1.last: 3.5700, output1.bidp: undefined, output1.askp: undefined
+

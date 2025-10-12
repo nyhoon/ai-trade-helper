@@ -35,7 +35,10 @@ class LoadWatchlistDataUseCase {
       // 3. 현재가 데이터 조회
       final Map<String, Map<String, dynamic>> currentPrices = {};
       for (final symbol in symbols) {
-        final priceData = await _apiService.getStockPrice(symbol);
+        // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+        print('🔍 [current 보호] LoadWatchlistDataUseCase에서 API 직접 호출 비활성화');
+        // final priceData = await _apiService.getStockPrice(symbol);
+        final priceData = null;
         if (priceData != null) {
           currentPrices[symbol] = priceData;
         }

@@ -66,8 +66,11 @@ class RecommendedStocksBackgroundService {
     _inflightPriceCalls++;
     _lastPriceCallAt = DateTime.now();
     try {
-      final api = KisUnifiedApiService();
-      return await api.getStockPrice(stockCode);
+      // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+      print('🔍 [current 보호] RecommendedStocksBackgroundService에서 API 직접 호출 비활성화');
+      return null;
+      // final api = KisUnifiedApiService();
+      // return await api.getStockPrice(stockCode);
     } catch (_) {
       return null;
     } finally {
@@ -495,9 +498,11 @@ class RecommendedStocksBackgroundService {
 
       if (!fresh) {
         try {
-          // 분석탭과 동일한 방식: SQL DB 우선, API 폴백
+          // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+          print('🔍 [current 보호] RecommendedStocksBackgroundService에서 API 직접 호출 비활성화');
           final results = await Future.wait([
-            KisUnifiedApiService().getStockPrice(stockCode),
+            // KisUnifiedApiService().getStockPrice(stockCode),
+            null, // API 호출 비활성화
             // SQL DB에서 차트 데이터 먼저 확인
             _appDataManager.historicalDataRepo.getRecentBars(stockCode, limit: 100),
           ]);
@@ -511,10 +516,11 @@ class RecommendedStocksBackgroundService {
             high = (priceData['highPrice'] ?? high).toDouble();
             low = (priceData['lowPrice'] ?? low).toDouble();
             open = (priceData['openPrice'] ?? open).toDouble();
+            // 🔄 거래량 덮어쓰기 방지 - volume 제외하고 업데이트
             _appDataManager.updateCurrentPrice(stockCode, {
               'currentPrice': currentPrice,
               'prevClose': prevClose,
-              'volume': volume,
+              // 'volume': volume,  // ← 거래량 덮어쓰기 방지
               'high': high,
               'low': low,
               'open': open,
@@ -528,7 +534,9 @@ class RecommendedStocksBackgroundService {
             print('📊 [백그라운드] SQL DB에서 차트 데이터 사용: $stockCode (${localChartData.length}개)');
           } else {
             // SQL DB에 없으면 API 호출
-            final chartData = await KisUnifiedApiService().getDailyChart(stockCode, count: 100);
+            // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+            print('📊 [RecommendedStocksBackground] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+            final chartData = <Map<String, dynamic>>[];
             if (chartData.isNotEmpty) {
               _appDataManager.cacheChartData(stockCode, chartData);
               print('📊 [백그라운드] API에서 차트 데이터 사용: $stockCode (${chartData.length}개)');
@@ -540,7 +548,9 @@ class RecommendedStocksBackgroundService {
       // 해외/특수 케이스 보정: 현재가/전일가가 0이면 차트 최신 종가로 보정하여 분석 일관성 유지
       if (currentPrice == 0.0 || prevClose == 0.0) {
         try {
-          final chart = await KisUnifiedApiService().getDailyChart(stockCode, count: 100);
+          // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+          print('📊 [RecommendedStocksBackground] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: $stockCode');
+          final chart = <Map<String, dynamic>>[];
           if (chart.isNotEmpty) {
             final lastClose = (chart.last['close'] as num?)?.toDouble() ?? 0.0;
             if (lastClose > 0) {
@@ -837,10 +847,11 @@ class RecommendedStocksBackgroundService {
                   ?? (price['acml_vol'] as num?)?.toDouble();
               // 캐시 보강
               try {
+                // 🔄 거래량 덮어쓰기 방지 - volume 제외하고 업데이트
                 _appDataManager.updateCurrentPrice(stockCode, {
                   'currentPrice': currentPrice ?? 0.0,
                   'prevClose': (price['prevClose'] as num?)?.toDouble() ?? 0.0,
-                  'volume': volume ?? 0.0,
+                  // 'volume': volume ?? 0.0,  // ← 거래량 덮어쓰기 방지
                   'timestamp': DateTime.now().toIso8601String(),
                 });
                 lastDataDate = DateTime.now();

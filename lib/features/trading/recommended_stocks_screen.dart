@@ -8,7 +8,7 @@ import '../../core/data/app_data_manager.dart';
 import '../../features/analysis/usecases/top_stocks_usecase.dart';
 import '../../features/analysis/models/top_stocks_state.dart';
 import '../../features/analysis/viewmodels/top_stocks_viewmodel.dart';
-import '../../core/remote/remote_kis_service.dart';
+import '../../core/api/unified_stock_service.dart';
 import '../../core/analysis/unified_analysis_service.dart';
 import '../../core/trading/investment_style_manager.dart';
 import '../../core/database/repositories/top_stocks_repository.dart';
@@ -17,29 +17,6 @@ import '../../core/utils/stock_filter_utils.dart';
 import '../../core/trading/market_time_validator.dart';
 import 'widgets/freshness_indicator.dart';
 
-// 더미 클래스 정의 (서버 이전 동안 컴파일 안전용)
-class _DummyBackgroundService {
-  bool get isServiceEnabled => false;
-  bool get isServiceRunning => false;
-  void Function(bool isEnabled)? onServiceStatusChanged;
-  void Function(Map<String, dynamic> progress)? onCalculationProgress;
-  void Function(List<Map<String, dynamic>> topStocks)? onTopStocksUpdated;
-  Future<void> initialize() async {}
-  Future<void> toggleService() async {}
-  Future<void> stopService() async {}
-  Future<void> startService() async {}
-  Future<void> setMinTradingAmount(double amount) async {}
-  Future<void> scanMarketOnce(String market) async {}
-}
-
-class _DummyService {
-  Future<void> initialize() async {}
-}
-
-class _DummyAiService {
-  Future<void> initialize() async {}
-  void cleanupTemporaryUniverseData() {}
-}
 /// 실시간 추천종목 화면
 /// 나스닥, 코스피, 코스닥 각각 상위 10개 종목을 실시간으로 표시
 class RecommendedStocksScreen extends StatefulWidget {
@@ -64,10 +41,6 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
   int _progressTick = 0;
   int _freshnessMinutes = 5;
 
-  // 더미 서비스: 기존 콜백/메서드 참조를 안전하게 무시하기 위함
-  final _DummyBackgroundService _backgroundService = _DummyBackgroundService();
-  final _DummyService _service = _DummyService();
-  final _DummyAiService _aiService = _DummyAiService();
   
   // MVI 패턴 상태 관리
   TopStocksViewState _currentState = const TopStocksViewState();
@@ -208,11 +181,14 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
     // 화면 이탈 시 스캔 중지로 다른 탭/화면 성능 보호
     try {
       if (_isBackgroundServiceEnabled && _isBackgroundServiceRunning) {
-        _backgroundService.stopService();
+        // 서버 이전으로 로컬 백그라운드 서비스 비활성화
+        setState(() {
+          _isBackgroundServiceRunning = false;
+        });
       }
     } catch (_) {}
     // 추천 화면 이탈 시: 409개 중 관심/보유 제외 임시 데이터 정리
-      _aiService.cleanupTemporaryUniverseData();
+    // 서버 이전으로 로컬 AI 서비스 비활성화
     super.dispose();
   }
 
@@ -223,7 +199,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
       // 앱 비활성화/다른 화면 전환 시 스캔 일시 중지
       try {
         if (_isBackgroundServiceRunning) {
-          _backgroundService.stopService();
+          // 서버 이전으로 로컬 백그라운드 서비스 비활성화
           setState(() {
             _isBackgroundServiceRunning = false;
           });
@@ -313,86 +289,16 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
     }
   }
 
-  /// 백그라운드에서 백그라운드 서비스 설정
+  /// 백그라운드에서 백그라운드 서비스 설정 (서버 이전으로 비활성화)
   Future<void> _setupBackgroundServiceInBackground() async {
-    try {
-      // 백그라운드 서비스 초기화 (타임아웃 단축)
-      await _backgroundService.initialize().timeout(
-        const Duration(seconds: 8), // 15초 → 8초로 단축
-        onTimeout: () {
-          print('⚠️ 백그라운드 서비스 초기화 타임아웃');
-          throw TimeoutException('백그라운드 서비스 초기화 타임아웃', const Duration(seconds: 8));
-        },
-      );
-
-      if (mounted) {
-        setState(() {
-          _isBackgroundServiceEnabled = _backgroundService.isServiceEnabled;
-          _isBackgroundServiceRunning = _backgroundService.isServiceRunning;
-        });
-
-        // 백그라운드 서비스가 비활성화되어 있으면 자동으로 시작 (타임아웃 단축)
-        if (!_isBackgroundServiceEnabled) {
-          print('🚀 백그라운드 서비스 자동 시작...');
-          _backgroundService.toggleService().timeout(
-            const Duration(seconds: 5), // 10초 → 5초로 단축
-            onTimeout: () {
-              print('⚠️ 백그라운드 서비스 자동 시작 타임아웃');
-              throw TimeoutException('백그라운드 서비스 자동 시작 타임아웃', const Duration(seconds: 5));
-            },
-          ).then((_) {
-            if (mounted) {
-              setState(() {
-                _isBackgroundServiceEnabled = _backgroundService.isServiceEnabled;
-                _isBackgroundServiceRunning = _backgroundService.isServiceRunning;
-              });
-              print('✅ 백그라운드 서비스 시작 완료');
-            }
-          }).catchError((error) {
-            print('❌ 백그라운드 서비스 자동 시작 실패: $error');
-          });
-        }
-      }
-    } catch (e) {
-      print('❌ 백그라운드 서비스 설정 실패: $e');
+    // 서버 이전으로 로컬 백그라운드 서비스 비활성화
+    if (mounted) {
+      setState(() {
+        _isBackgroundServiceEnabled = false;
+        _isBackgroundServiceRunning = false;
+      });
     }
-
-    // 서비스 상태 변경 콜백
-    _backgroundService.onServiceStatusChanged = (isEnabled) {
-      if (mounted) {
-        setState(() {
-          _isBackgroundServiceEnabled = isEnabled;
-          _isBackgroundServiceRunning = _backgroundService.isServiceRunning;
-        });
-      }
-    };
-
-    // 계산 진행률 콜백
-    _backgroundService.onCalculationProgress = (progress) {
-      if (mounted) {
-        setState(() {
-          _calculationProgress = (progress['progress'] as num?)?.toDouble() ?? 0.0;
-          _currentMarket = progress['currentMarket'] as String? ?? '';
-          _currentStock = progress['currentStock'] as String? ?? '';
-          // 서비스에서 내려오는 총/진행 수치 우선 사용
-          _processedCount = (progress['calculatedStocks'] as int?)
-              ?? (progress['currentIndex'] as int?)
-              ?? _processedCount;
-          _totalCount = (progress['totalStocks'] as int?)
-              ?? (progress['totalIndex'] as int?)
-              ?? _totalCount;
-          _lastUpdateTime = DateTime.now().toString().substring(11, 19);
-        });
-      }
-    };
-
-
-    // 상위 종목 업데이트 콜백
-    _backgroundService.onTopStocksUpdated = (topStocks) {
-      if (mounted) {
-        _updateMarketTopStocks(topStocks);
-      }
-    };
+    print('ℹ️ 서버 이전으로 로컬 백그라운드 서비스 비활성화됨');
   }
 
   /// 시장별 상위 종목 로드 (병렬 처리)
@@ -498,19 +404,19 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
         _isBackgroundServiceEnabled = !_isBackgroundServiceEnabled;
       });
       
-      // 백그라운드 서비스 토글 실행 (타임아웃 설정)
-      await _backgroundService.toggleService().timeout(
-        const Duration(seconds: 10),
-        onTimeout: () {
-          print('⚠️ 백그라운드 서비스 토글 타임아웃');
-          throw TimeoutException('백그라운드 서비스 토글 타임아웃', const Duration(seconds: 10));
-        },
-      );
+        // 서버 이전으로 로컬 백그라운드 서비스 비활성화
+        // await _backgroundService.toggleService().timeout(
+        //   const Duration(seconds: 10),
+        //   onTimeout: () {
+        //     print('⚠️ 백그라운드 서비스 토글 타임아웃');
+        //     throw TimeoutException('백그라운드 서비스 토글 타임아웃', const Duration(seconds: 10));
+        //   },
+        // );
       
       // 실제 상태 확인 및 업데이트
       setState(() {
-        _isBackgroundServiceEnabled = _backgroundService.isServiceEnabled;
-        _isBackgroundServiceRunning = _backgroundService.isServiceRunning;
+        _isBackgroundServiceEnabled = false; // 서버 이전으로 비활성화
+        _isBackgroundServiceRunning = false; // 서버 이전으로 비활성화
       });
       
       print('✅ 백그라운드 서비스 토글 완료: enabled=$_isBackgroundServiceEnabled, running=$_isBackgroundServiceRunning');
@@ -534,7 +440,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
       // 실패 시 이전 상태로 롤백
       setState(() {
         _isBackgroundServiceEnabled = !_isBackgroundServiceEnabled;
-        _isBackgroundServiceRunning = _backgroundService.isServiceRunning;
+        _isBackgroundServiceRunning = false; // 서버 이전으로 비활성화
       });
       
       if (mounted) {
@@ -601,7 +507,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
   /// 거래대금 설정 변경
   Future<void> _changeTradingAmount(double amount) async {
     try {
-      await _backgroundService.setMinTradingAmount(amount);
+      // await _backgroundService.setMinTradingAmount(amount); // 서버 이전으로 비활성화
       setState(() {
         _minTradingAmount = amount;
       });
@@ -860,7 +766,9 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
       // 순차로 부담을 줄이되, 적은 수이므로 빠르게 처리
       for (final code in codesToRefresh) {
         // 다이얼로그 새로고침과 동일 입력 준비
-        final priceData = await RemoteKisService.instance.getCurrentPrice(code);
+        // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+        print('📊 [추천종목] 직접 API 호출 비활성화 - Firestore 구독 사용: $code');
+        final priceData = null;
         final cached = AppDataManager.instance.getCachedStockData(code);
         double currentPrice = ((priceData?['currentPrice'] as num?)?.toDouble())
           ?? (cached['currentPrice'] as num?)?.toDouble()
@@ -896,7 +804,9 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
             print('📊 [추천종목] SQL DB에서 차트 데이터 사용: $code (${localChartData.length}개)');
           } else {
             // SQL DB에 없으면 API 호출
-            final chart = await RemoteKisService.instance.getDailyChart(code, days: 100);
+            // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+            print('📊 [추천종목] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: $code');
+            final chart = <Map<String, dynamic>>[];
             if (chart.isNotEmpty) {
               AppDataManager.instance.cacheChartData(code, chart);
               print('📊 [추천종목] API에서 차트 데이터 사용: $code (${chart.length}개)');
@@ -986,9 +896,9 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
                 
                 // 백그라운드 서비스 재시작
                 if (_isBackgroundServiceEnabled) {
-                  await _backgroundService.stopService();
+                  // await _backgroundService.stopService(); // 서버 이전으로 비활성화
                   await Future.delayed(const Duration(seconds: 1));
-                  await _backgroundService.startService();
+                  // await _backgroundService.startService(); // 서버 이전으로 비활성화
                 }
               },
               child: const Text('확인'),
@@ -1617,7 +1527,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
       await _refreshTopVisibleScores();
 
       // 배경 점수 재계산 트리거가 필요하면 다음 라인을 사용 (무거움)
-      // await _backgroundService.scanMarketOnce(market);
+      // await _backgroundService.scanMarketOnce(market); // 서버 이전으로 비활성화
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1868,7 +1778,9 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
                     loaderShown = true;
                   } catch (_) {}
                   // 1) 분석탭과 완전히 동일한 데이터 수집 로직 사용 (실시간 API 우선)
-                  final Map<String, dynamic>? priceData = await RemoteKisService.instance.getCurrentPrice(stock.stockCode);
+                  // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+                  print('📊 [추천종목] 직접 API 호출 비활성화 - Firestore 구독 사용: ${stock.stockCode}');
+                  final Map<String, dynamic>? priceData = null;
                   final cached = AppDataManager.instance.getCachedStockData(stock.stockCode);
                   
                   // 분석탭과 동일한 데이터 추출 (API 우선, 캐시 폴백)
@@ -1906,7 +1818,9 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
                       print('📊 [추천종목] SQL DB에서 차트 데이터 사용: ${stock.stockCode} (${localChartData.length}개)');
                     } else {
                       // SQL DB에 없으면 API 호출
-                      final chartData = await RemoteKisService.instance.getDailyChart(stock.stockCode, days: 100);
+                      // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
+                      print('📊 [추천종목] 차트 데이터 API 호출 비활성화 - Firestore 구독 사용: ${stock.stockCode}');
+                      final chartData = <Map<String, dynamic>>[];
                       if (chartData.isNotEmpty) {
                         AppDataManager.instance.cacheChartData(stock.stockCode, chartData);
                         print('📊 [추천종목] API에서 차트 데이터 사용: ${stock.stockCode} (${chartData.length}개)');
@@ -1916,10 +1830,11 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
                   
                   // 분석탭과 동일한 캐시 업데이트
                   try {
+                    // 🔄 거래량 덮어쓰기 방지 - volume 제외하고 업데이트
                     AppDataManager.instance.updateCurrentPrice(stock.stockCode, {
                       'currentPrice': currentPrice,
                       'prevClose': prevClose,
-                      'volume': volume,
+                      // 'volume': volume,  // ← 거래량 덮어쓰기 방지
                       'high': high,
                       'low': low,
                       'open': open,

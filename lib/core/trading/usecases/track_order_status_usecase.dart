@@ -11,7 +11,10 @@ class TrackOrderStatusUseCase {
     try {
       print('🔍 주문 상태 추적 시작');
       
-      final pending = await KisUnifiedApiService().getOverseasPendingOrders();
+      // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+      print('🔍 [current 보호] TrackOrderStatusUseCase에서 API 직접 호출 비활성화');
+      // final pending = await KisUnifiedApiService().getOverseasPendingOrders();
+      final pending = <Map<String, dynamic>>[];
       if (pending == null || pending.isEmpty) {
         print('📋 대기 중인 주문이 없습니다.');
         return;

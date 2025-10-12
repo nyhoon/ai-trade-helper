@@ -535,9 +535,12 @@ class KisUnifiedApiService {
             } catch (_) {}
           }
 
+          // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+          print('🔍 [current 보호] KisUnifiedApiService에서 API 직접 호출 비활성화');
           // 최종 Fallback: 여전히 주요 값이 0이면 일봉 2개로 보정
           try {
-            final chart = await getDailyChart(symbol, count: 2);
+            // final chart = await getDailyChart(symbol, count: 2);
+            final chart = <Map<String, dynamic>>[];
             if (chart.isNotEmpty) {
               final last = chart.first;
               final prev = chart.length > 1 ? chart[1] : null;
@@ -579,7 +582,7 @@ class KisUnifiedApiService {
   /// 해외주식 현재가 응답 파싱 (기존 성공하는 API 구조 참고)
   Future<Map<String, dynamic>> _parseOverseasStockPriceResponse(Map<String, dynamic> output, String exchangeCode) async {
     // 기존 성공하는 API 구조 참고: output 필드에서 직접 추출
-    final currentPrice = parseDouble(output['last'] ?? output['prpr'] ?? 0);
+    var currentPrice = parseDouble(output['last'] ?? output['prpr'] ?? 0);
     final openPrice = parseDouble(output['open'] ?? 0);
     final highPrice = parseDouble(output['high'] ?? 0);
     final lowPrice = parseDouble(output['low'] ?? 0);
@@ -594,7 +597,7 @@ class KisUnifiedApiService {
     print('🔍 [해외주식 필드 매핑] API 응답 원본:');
     print('  - symbol: $symbol');
     
-    // NVD 특별 로깅
+    // NVD 특별 로깅 및 가격 검증
     if (symbol.toUpperCase() == 'NVD') {
       print('🔍 [NVD 현재가 API 응답] 상세 분석:');
       print('  - output keys: ${output.keys.toList()}');
@@ -608,6 +611,15 @@ class KisUnifiedApiService {
       print('    - avol: ${output['avol']}');
       print('    - bdvl: ${output['bdvl']}');
       print('    - advl: ${output['advl']}');
+      
+      // NVD 가격 검증: 100에 가까운 값이면 잘못된 데이터로 판단
+      if (currentPrice > 50 && currentPrice < 200) {
+        print('⚠️ [NVD 가격 검증] 의심스러운 가격 범위 감지: $currentPrice');
+        print('⚠️ [NVD 가격 검증] NVD는 보통 10달러 이하이므로 API 응답 오류 가능성');
+        // 가격을 0으로 설정하여 폴백 데이터 사용 유도
+        currentPrice = 0.0;
+        print('🔧 [NVD 가격 검증] 가격을 0으로 설정하여 폴백 데이터 사용');
+      }
     }
     
     // PLTZ 특별 로깅
@@ -1134,7 +1146,7 @@ class KisUnifiedApiService {
           'low': (data['low'] ?? 0.0).toDouble(),
           'close': (data['close'] ?? 0.0).toDouble(),
           'volume': (data['volume'] ?? 0).toInt(),
-          'trade_amount': data['trade_amount'],
+          'trade_amount': (data['close'] ?? 0.0) * (data['volume'] ?? 0), // 거래대금 = 종가 × 거래량
           'updated_at': FieldValue.serverTimestamp(),
         }, SetOptions(merge: true));
       }
@@ -1153,6 +1165,8 @@ class KisUnifiedApiService {
   
   /// 종목 코드로 자동 판별하여 현재가 조회
   Future<Map<String, dynamic>?> getStockPrice(String stockCode) async {
+    // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+    print('🔍 [current 보호] KisUnifiedApiService에서 API 직접 호출 비활성화');
     // 서버 전환: 클라이언트에서 통일API 호출 금지
     return null;
   }
@@ -1442,7 +1456,10 @@ class KisUnifiedApiService {
   /// 종목 코드 자동 판별 및 현재가 조회
   Future<Map<String, dynamic>?> getStockPriceAuto(String stockCode) async {
     try {
-      print('🔍 [통일API] 종목 자동 판별: $stockCode');
+      // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+      print('🔍 [current 보호] KisUnifiedApiService에서 API 직접 호출 비활성화');
+      return null;
+      // print('🔍 [통일API] 종목 자동 판별: $stockCode');
       
       // 해외주식 판별 (대문자 영문 1-5자리)
       if (RegExp(r'^[A-Z]{1,5}$').hasMatch(stockCode)) {
@@ -1451,10 +1468,13 @@ class KisUnifiedApiService {
           print('🔍 [NVDL getStockPriceAuto] 해외주식 현재가 조회 시작');
         }
         
-        final result = await getOverseasStockPrice(
-          symbol: stockCode,
-          exchangeCode: 'NAS', // 기본값: 나스닥
-        );
+        // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+        print('🔍 [current 보호] KisUnifiedApiService에서 API 직접 호출 비활성화');
+        // final result = await getOverseasStockPrice(
+        //   symbol: stockCode,
+        //   exchangeCode: 'NAS', // 기본값: 나스닥
+        // );
+        final result = null;
         
         // NVDL 결과 디버깅
         if (stockCode.toUpperCase() == 'NVDL' && result != null) {
@@ -1844,10 +1864,13 @@ class KisUnifiedApiService {
   /// 해외주식 현재가 조회 (호환성)
   Future<Map<String, dynamic>?> getOverseasCurrentPrice(String symbol) async {
     try {
-      final priceData = await getOverseasStockPrice(
-        symbol: symbol,
-        exchangeCode: 'NAS',
-      );
+      // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
+      print('🔍 [current 보호] KisUnifiedApiService에서 API 직접 호출 비활성화');
+      // final priceData = await getOverseasStockPrice(
+      //   symbol: symbol,
+      //   exchangeCode: 'NAS',
+      // );
+      final priceData = null;
       if (priceData != null) {
         return {
           'currentPrice': priceData['currentPrice'],
