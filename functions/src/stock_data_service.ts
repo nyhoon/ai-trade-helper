@@ -475,6 +475,7 @@ export class StockDataService {
           prevClose = Number(prevSnap.docs[1].data().close ?? currentPrice) || currentPrice;
         }
       } catch (_) {}
+      const volFromBar = Number(d.volume ?? 0) || 0;
       const result = {
         currentPrice,
         prevClose,
@@ -483,8 +484,8 @@ export class StockDataService {
         open: Number(d.open ?? currentPrice) || currentPrice,
         high: Number(d.high ?? currentPrice) || currentPrice,
         low: Number(d.low ?? currentPrice) || currentPrice,
-        volume: Number(d.volume ?? 0) || 0, // ✅ 차트 데이터의 거래량 사용 (최신 데이터)
-        tradeAmount: currentPrice * volume, // 거래대금 = 현재가 × 거래량
+        volume: volFromBar, // ✅ 차트 데이터의 거래량 사용 (최신 데이터)
+        tradeAmount: currentPrice * volFromBar, // 거래대금 = 현재가 × 거래량
         timestamp: new Date()
       };
       console.log(`✅ 차트 기반 현재가 폴백 성공: ${symbol} - ${result.currentPrice}`);
@@ -1554,6 +1555,43 @@ export class StockDataService {
         console.log(`⚠️ 정규화 후 현재가 데이터 무효 (저장 건너뜀): ${symbol}`);
         return;
       }
+
+      // ✅ prevClose 보강: 누락/0이면 차트에서 어제 종가로 대체
+      try {
+        if (!normalizedData.prevClose || normalizedData.prevClose === 0) {
+          const dbForPrev = admin.firestore();
+          // 1) chart 컬렉션 우선 조회 (최신 → 과거)
+          const chartSnap = await dbForPrev.collection('stocks').doc(symbol)
+            .collection('chart')
+            .orderBy('date_ts', 'desc' as any)
+            .limit(2)
+            .get();
+          if (!chartSnap.empty && chartSnap.docs.length >= 2) {
+            normalizedData.prevClose = Number(chartSnap.docs[1].data().close) || normalizedData.prevClose;
+            console.log(`✅ [saveCurrentPriceData] prevClose 보강(chart 컬렉션): ${symbol} = ${normalizedData.prevClose}`);
+          } else {
+            // 2) chart 필드 배열에서 보강
+            const doc = await dbForPrev.collection('stocks').doc(symbol).get();
+            const chartField = doc.data()?.chart;
+            if (Array.isArray(chartField) && chartField.length >= 2) {
+              normalizedData.prevClose = Number(chartField[1].close) || normalizedData.prevClose;
+              console.log(`✅ [saveCurrentPriceData] prevClose 보강(chart 필드): ${symbol} = ${normalizedData.prevClose}`);
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`⚠️ [saveCurrentPriceData] prevClose 보강 실패: ${symbol}`, e);
+      }
+
+      // ✅ change/changeRate 재계산(일관성 보장)
+      if (normalizedData.prevClose && normalizedData.prevClose !== 0) {
+        normalizedData.change = Number(normalizedData.currentPrice) - Number(normalizedData.prevClose);
+        normalizedData.changeRate = (normalizedData.change / Number(normalizedData.prevClose)) * 100;
+      } else {
+        // prevClose가 여전히 없으면 등락률은 계산하지 않음
+        normalizedData.change = normalizedData.change ?? 0;
+        normalizedData.changeRate = 0;
+      }
       
       // 🔍 current 필드 보호: 유효한 데이터만 저장
       const updateData: any = {
@@ -1569,7 +1607,7 @@ export class StockDataService {
       // current 필드는 유효한 경우에만 업데이트
       if (normalizedData && normalizedData.currentPrice && normalizedData.currentPrice > 0) {
         updateData.current = normalizedData;
-        console.log(`✅ [saveCurrentPriceData] current 필드 업데이트: ${symbol} - ${normalizedData.currentPrice}`);
+        console.log(`✅ [saveCurrentPriceData] current 필드 업데이트: ${symbol} - ${normalizedData.currentPrice} (prevClose=${normalizedData.prevClose}, change=${normalizedData.change}, changeRate=${normalizedData.changeRate})`);
       } else {
         console.log(`🔍 [saveCurrentPriceData] current 필드 보호: ${symbol} - 기존 데이터 유지`);
       }

@@ -88,6 +88,7 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initializeScreenFast();
+    _prefetchTopCandidates();
   }
 
 // 아래는 컴파일 안전을 위한 더미 클래스. 서버 이전 후 제거 대상
@@ -260,9 +261,53 @@ class _RecommendedStocksScreenState extends State<RecommendedStocksScreen> with 
     _autoRefreshTimer = Timer.periodic(const Duration(minutes: 5), (timer) async {
       if (!mounted || _isLoading) return;
       try {
+        await _prefetchTopCandidates();
         await _refreshMarketTopStocks();
       } catch (_) {}
     });
+  }
+
+  /// 상위 후보 N개 종목의 차트/현재가/분석을 서버에서 먼저 보장
+  Future<void> _prefetchTopCandidates({int count = 10}) async {
+    try {
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+      final symbols = <String>{};
+      try {
+        final watchlist = await AppDataManager.instance.getWatchlistWithScores();
+        for (final it in watchlist.take(count)) {
+          final code = it['stock_code'] ?? it['stockCode'];
+          if (code is String && code.isNotEmpty) symbols.add(code);
+        }
+      } catch (_) {}
+      try {
+        final holdings = await AppDataManager.instance.loadAllHoldings();
+        for (final it in holdings.take(count)) {
+          final code = it['pdno'] ?? it['stockCode'] ?? it['stock_code'];
+          if (code is String && code.isNotEmpty) symbols.add(code);
+        }
+      } catch (_) {}
+      if (symbols.isEmpty) return;
+      final limited = symbols.take(count).toList();
+      print('🔄 [추천] 상위 후보 프리보장 시작: ${limited.length}개');
+      const int concurrency = 5;
+      for (int i = 0; i < limited.length; i += concurrency) {
+        final batch = limited.sublist(i, (i + concurrency).clamp(0, limited.length));
+        await Future.wait(batch.map((code) async {
+          try {
+            final ok = await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: code);
+            print('✅ [추천] ensureChartAndAnalyze: $code = $ok');
+            await FirebaseFirestore.instance
+              .collection('stocks').doc(code)
+              .get(const GetOptions(source: Source.server));
+          } catch (e) {
+            print('⚠️ [추천] 프리보장 실패: $code - $e');
+          }
+        }));
+      }
+      print('✅ [추천] 상위 후보 프리보장 완료');
+    } catch (e) {
+      print('⚠️ [추천] 상위 후보 프리보장 중 오류: $e');
+    }
   }
 
   // 백그라운드 서비스는 서버 이전으로 제거됨

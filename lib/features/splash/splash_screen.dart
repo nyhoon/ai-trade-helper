@@ -753,8 +753,8 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
       try {
         final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
         
-        // 1. 차트데이터 강제 최신화 (서버에서)
-        print('🔄 $stockCode 차트데이터 강제 최신화 시도...');
+        // 1. 차트/현재가/분석 강제 최신화 (서버 보장) - 스플래시에서는 반드시 await
+        print('🔄 [스플래시] $stockCode 서버 최신화 보장 시작');
         await RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: stockCode);
         
         // 2. 현재가 데이터 강제 최신화 (통일된 서비스 사용)
@@ -768,11 +768,14 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
           break;
         }
         
-        // 3. 서버 실패 시 Firestore에서 데이터 확인
+        // 3. 서버 실패 시 Firestore에서 데이터 확인 (server source 강제)
         print('⚠️ $stockCode 서버 실패 → Firestore에서 데이터 확인...');
         try {
-          // Firestore에서 직접 데이터 조회
-          final firestoreData = await FirestoreStockService.getStockData(stockCode);
+          // Firestore에서 직접 데이터 조회 (캐시 무시)
+          final firestoreData = await FirebaseFirestore.instance
+              .collection('stocks').doc(stockCode)
+              .get(const GetOptions(source: Source.server))
+              .then((d) => d.data());
           if (firestoreData != null && firestoreData['current'] != null) {
             final current = firestoreData['current'] as Map<String, dynamic>;
             final currentPrice = current['currentPrice'] as num?;

@@ -221,24 +221,28 @@ class _TradingScreenViewState extends State<TradingScreenView> {
 
   /// 자동 새로고침 시작 (데이터베이스 락 방지를 위해 간격 증가)
   void _startAutoRefresh() {
-    _refreshTimer = Timer.periodic(const Duration(seconds: 15), (timer) async {
+    _refreshTimer = Timer.periodic(const Duration(seconds: 30), (timer) async {
       if (!_isRefreshing && mounted) {
         _isRefreshing = true;
         try {
           // 데이터베이스 락 방지를 위해 캐시 우선 새로고침
           await _appDataManager.refreshMarketData();
 
-          // 1) 서버 보유목록 동기화: KIS → Firestore → 캐시
+          // 1) 서버 보유목록 동기화: KIS → Firestore → 캐시 (30초 주기)
           try {
-            // ✅ API 직접 호출 비활성화 - Firestore 구독 사용
-            print('🔍 [current 보호] TradingScreen에서 API 직접 호출 비활성화');
-            // final apiPositions = await KisUnifiedApiService().getPositionsCompat();
-            // await _appDataManager.holdingsRepository.syncWithApi(apiPositions);
+            print('🔄 [거래탭] 보유목록 동기화 시작 (KIS→Firestore)');
+            final apiPositions = await KisUnifiedApiService().getPositionsCompat();
+            await _appDataManager.holdingsRepository.syncWithApi(apiPositions);
+            print('✅ [거래탭] 보유목록 동기화 완료: ${apiPositions.length}건');
           } catch (e) {
             print('⚠️ 보유목록 동기화 실패(KIS→Firestore): $e');
           }
 
           // 보유종목 강제 최신화: Firestore → 캐시 동기화 후 Bloc 리프레시
+          // 2) Firestore → 로컬 재적재 (서버 소스 우선)
+          try {
+            await AppDataManager.instance.loadAllHoldings();
+          } catch (_) {}
           await AppDataManager.instance.loadPositions();
           if (mounted) {
             context.read<TradingBloc>().add(RefreshTradingData(stockCode: _selectedStock));
@@ -251,16 +255,35 @@ class _TradingScreenViewState extends State<TradingScreenView> {
       }
     });
 
-    // 현재가 10초 보장 트리거 (Firestore 구독으로 대체)
-    _priceEnsureTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
-      // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
-      print('🔄 현재가 보장 트리거 비활성화 - Firestore 구독 사용');
+    // 현재가/보유종목 30초 보장 트리거 (가벼운 병렬 호출)
+    _priceEnsureTimer = Timer.periodic(const Duration(seconds: 30), (timer) async {
+      if (!mounted) return;
+      try {
+        final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+        // 화면에 필요한 심볼만 수집 (선택 종목 + 보유 + 관심 일부)
+        final symbols = await _collectSymbols();
+        if (symbols.isEmpty) return;
+        // 서버에 데이터 보장 요청 (차트/현재가/분석 저장) → 앱은 Firestore만 읽음
+        await Future.wait(symbols.take(12).map((code) =>
+            RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: code)));
+        // 보유 목록 캐시 재적재
+        await AppDataManager.instance.loadPositions();
+      } catch (e) {
+        print('⚠️ 30초 보장 트리거 실패: $e');
+      }
     });
 
-    // 차트 30분 보장 트리거 (Firestore 구독으로 대체)
+    // 차트 30분 보장 트리거 (필요 최소 심볼만)
     _chartEnsureTimer = Timer.periodic(const Duration(minutes: 30), (timer) async {
-      // Firestore 구독으로 대체되므로 직접 API 호출 비활성화
-      print('🔄 차트 보장 트리거 비활성화 - Firestore 구독 사용');
+      if (!mounted) return;
+      try {
+        final uid = FirebaseAuth.instance.currentUser?.uid ?? 'debug-user';
+        final symbols = await _collectSymbols();
+        await Future.wait(symbols.take(12).map((code) =>
+            RemoteKisService.instance.ensureChartAndAnalyze(uid: uid, symbol: code)));
+      } catch (e) {
+        print('⚠️ 30분 차트 보장 실패: $e');
+      }
     });
   }
 

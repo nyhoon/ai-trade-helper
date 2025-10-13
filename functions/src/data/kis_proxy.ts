@@ -257,6 +257,7 @@ export class KISProxy {
           high_price: Number(output.stck_hgpr) || 0,
           low_price: Number(output.stck_lwpr) || 0,
           volume: Number(output.acml_vol) || 0,
+          trade_amount: Number(output.acc_trdval) || 0, // 누적 거래대금
           timestamp: Date.now(),
           market: 'KOSPI',
         };
