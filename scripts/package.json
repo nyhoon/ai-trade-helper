@@ -1,0 +1,17 @@
+{
+  "name": "admin-scripts",
+  "version": "1.0.0",
+  "description": "Firebase Admin Scripts",
+  "scripts": {
+    "upload-symbols": "node upload_master_symbols.js",
+    "run-pipeline": "node run_pipeline.js",
+    "enqueue-from-master": "node enqueue_from_master.js 3000 1",
+    "check-and-seed": "node check_and_seed.js",
+    "set-processing-uid": "node set_processing_uid.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "adm-zip": "^0.5.10"
+  }
+}
+

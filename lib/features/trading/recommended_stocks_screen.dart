@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'dart:async';
 import '../../core/remote/analysis_functions_service.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../core/data/recommended_stocks_data.dart';
 import '../../core/ai/ai_recommendation_service.dart';
 import '../../core/data/app_data_manager.dart';
@@ -16,6 +17,7 @@ import '../../core/data/freshness_manager.dart';
 import '../../core/utils/stock_filter_utils.dart';
 import '../../core/trading/market_time_validator.dart';
 import 'widgets/freshness_indicator.dart';
+import '../../core/remote/remote_kis_service.dart';
 
 /// 실시간 추천종목 화면
 /// 나스닥, 코스피, 코스닥 각각 상위 10개 종목을 실시간으로 표시

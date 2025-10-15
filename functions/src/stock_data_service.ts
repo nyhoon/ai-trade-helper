@@ -12,6 +12,13 @@ if (!admin.apps.length) {
  * 종목 하나에 대한 모든 정보를 한 번에 조회/생성/저장
  */
 export class StockDataService {
+  /**
+   * 유효 심볼 판별: 국내(숫자 5~6), 해외(영문/점 1~6)
+   */
+  private static isValidSymbol(symbol: string): boolean {
+    if (!symbol) return false;
+    return /^\d{5,6}$/.test(symbol) || /^[A-Z.]{1,6}$/.test(symbol);
+  }
   
   /**
    * 통합 종목 데이터 조회
@@ -138,6 +145,10 @@ export class StockDataService {
    */
   static async ensureChartAndAnalyze(symbol: string, uid: string, market: string = 'NASDAQ', bars?: number) {
     try {
+      if (!this.isValidSymbol(symbol)) {
+        console.log(`⚠️ 무효 심볼 스킵: ${symbol}`);
+        return null;
+      }
       console.log(`📊 차트 데이터 생성 및 분석 시작: ${symbol} (uid: ${uid}, market: ${market})`);
       
       // 1. 차트 데이터 생성
@@ -146,13 +157,46 @@ export class StockDataService {
       console.log(`📊 1단계 완료: 차트 데이터 ${chartData.length}개 생성 - ${symbol}`);
       
       // 1-1. 종목 기본 정보 조회 및 저장 (문서 보강)
+      //      국내: REITs/ETF 메타 보강, 해외: 해외주식구분코드(ovrs_stck_dvsn_cd) 메타 보강
       try {
         const stockInfo = await this.getStockInfo(symbol);
+        let metaUpdate: any = {};
+        // 국내 코드면 search-stock-info로 REITs/ETF 구분 조회
+        if (/^\d{5,6}$/.test(symbol)) {
+          const { KISProxy } = await import('./data/kis_proxy');
+          const meta = await KISProxy.fetchDomesticSearchInfo(symbol, uid);
+          if (meta) {
+            metaUpdate = {
+              meta: {
+                ...(stockInfo as any).meta,
+                reits_kind_cd: meta.reits_kind_cd,
+                etf_dvsn_cd: meta.etf_dvsn_cd,
+                metaUpdated: new Date(),
+              }
+            };
+          }
+        } else if (/^[A-Z.]{1,6}$/.test(symbol)) {
+          // 해외 심볼: overseas search-info로 해외주식구분코드 보강
+          const { KISProxy } = await import('./data/kis_proxy');
+          // EXCD 순회로 정확도 향상
+          const meta = await KISProxy.fetchOverseasSearchInfoWithFallback(symbol, ['NAS','NYS','HKS'], uid);
+          if (meta && meta.ovrs_stck_dvsn_cd) {
+            metaUpdate = {
+              meta: {
+                ...(stockInfo as any).meta,
+                ovrs_stck_dvsn_cd: meta.ovrs_stck_dvsn_cd,
+                exchangeCode: meta.exchangeCode,
+                metaUpdated: new Date(),
+              }
+            };
+          }
+        }
         const db = admin.firestore();
         await db.collection('stocks').doc(symbol).set({
           symbol,
           info: stockInfo,
           // ✅ current 필드 제거 (null로 덮어쓰지 않음)
+          ...metaUpdate,
           metadata: {
             lastUpdated: new Date(),
             infoUpdated: new Date(),
@@ -267,6 +311,99 @@ export class StockDataService {
       };
     }
   }
+
+  /**
+   * 분석 배치: stocks 컬렉션에서 최대 N개 문서를 가져와 분석 보장
+   */
+  static async analyzeBatch(limit: number = 300, uid: string = 'system-batch') {
+    const db = admin.firestore();
+    const snap = await db.collection('stocks').limit(limit).get();
+    if (snap.empty) {
+      return { analyzed: 0, skipped: 0 };
+    }
+    let analyzed = 0;
+    let skipped = 0;
+    for (const doc of snap.docs) {
+      const symbol = doc.id;
+      if (!this.isValidSymbol(symbol)) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        await this.ensureChartAndAnalyze(symbol, uid);
+        analyzed += 1;
+        await new Promise(r => setTimeout(r, 80));
+      } catch (e) {
+        console.log('⚠️ analyzeBatch skip', symbol, e);
+      }
+    }
+    return { analyzed, skipped };
+  }
+
+  /**
+   * 메타 백필 배치: stocks 컬렉션 전량에 대해 국내/해외 메타를 채움
+   * - 국내: reits_kind_cd, etf_dvsn_cd
+   * - 해외: ovrs_stck_dvsn_cd, exchangeCode (EXCD 순회)
+   */
+  static async backfillAllMeta(uid?: string, limitPerRun: number = 500) {
+    const db = admin.firestore();
+    let snap = await db.collection('stocks').limit(limitPerRun).get();
+    if (snap.empty) {
+      // 비어있으면 master/symbols 문서에서 불러오거나, 없으면 기본 심볼로 시드
+      const masterRef = db.collection('master').doc('symbols');
+      const masterSnap = await masterRef.get();
+      const domesticList: string[] = (masterSnap.exists ? (masterSnap.data()?.domestic as string[]) : undefined) || ['005930','000660','035420','035720','068270','051910','207940','006400','105560','000270'];
+      const overseasList: string[] = (masterSnap.exists ? (masterSnap.data()?.overseas as string[]) : undefined) || ['AAPL','MSFT','GOOGL','AMZN','TSLA','NVDA','META','NFLX','AMD','AVGO'];
+      const seeds = [...domesticList, ...overseasList].slice(0, limitPerRun);
+      for (const s of seeds) {
+        await db.collection('stocks').doc(s).set({ symbol: s, createdAt: new Date() }, { merge: true });
+      }
+      snap = await db.collection('stocks').limit(limitPerRun).get();
+    }
+    if (snap.empty) return { processed: 0 };
+
+    let processed = 0;
+    for (const doc of snap.docs) {
+      const symbol = doc.id;
+      try {
+        // 국내 코드
+        if (/^\d{5,6}$/.test(symbol)) {
+          const { KISProxy } = await import('./data/kis_proxy');
+          const meta = await KISProxy.fetchDomesticSearchInfo(symbol, uid);
+          if (meta) {
+            await db.collection('stocks').doc(symbol).set({
+              meta: {
+                ...(doc.data().meta || {}),
+                reits_kind_cd: meta.reits_kind_cd,
+                etf_dvsn_cd: meta.etf_dvsn_cd,
+                metaUpdated: new Date(),
+              }
+            }, { merge: true });
+          }
+        // 해외 코드
+        } else if (/^[A-Z.]{1,6}$/.test(symbol)) {
+          const { KISProxy } = await import('./data/kis_proxy');
+          const meta = await KISProxy.fetchOverseasSearchInfoWithFallback(symbol, ['NAS','NYS','HKS'], uid);
+          if (meta && meta.ovrs_stck_dvsn_cd) {
+            await db.collection('stocks').doc(symbol).set({
+              meta: {
+                ...(doc.data().meta || {}),
+                ovrs_stck_dvsn_cd: meta.ovrs_stck_dvsn_cd,
+                exchangeCode: meta.exchangeCode,
+                metaUpdated: new Date(),
+              }
+            }, { merge: true });
+          }
+        }
+        processed += 1;
+        // API 한도 방지 소량 대기
+        await new Promise(r => setTimeout(r, 80));
+      } catch (e) {
+        console.log('⚠️ backfill skip', symbol, e);
+      }
+    }
+    return { processed };
+  }
   
   /**
    * 종목 기본 정보 조회/생성
@@ -284,7 +421,8 @@ export class StockDataService {
           name: data.name || symbol,
           market: data.market || 'KOSPI',
           sector: data.sector || 'Unknown',
-          lastUpdated: data.lastUpdated
+          lastUpdated: data.lastUpdated,
+          meta: data.meta || undefined
         };
       } else {
         // 새 종목 정보 생성

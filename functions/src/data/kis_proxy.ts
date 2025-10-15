@@ -14,6 +14,16 @@ export class KISProxy {
    */
   private static async getApiCredentials(uid?: string): Promise<{appKey: string, appSecret: string, account: string}> {
     try {
+      // 0) system/settings.processingUid 우선 적용 (서버 자율 실행 보장)
+      try {
+        const sysSnap = await admin.firestore().collection('system').doc('settings').get();
+        const procUid = sysSnap.exists ? (sysSnap.data() as any)?.processingUid : null;
+        if (!uid && procUid && typeof procUid === 'string') {
+          uid = procUid;
+          console.log(`🔍 [KISProxy] processingUid 사용: ${uid}`);
+        }
+      } catch (_) {}
+
       // 특정 사용자의 API 설정 조회 (uid가 제공된 경우)
       if (uid) {
         console.log(`🔍 [KISProxy] 특정 사용자 API 설정 조회: ${uid}`);
@@ -51,6 +61,15 @@ export class KISProxy {
           }
         } else {
           console.log(`⚠️ [KISProxy] 사용자 ${uid}의 API 설정 문서가 존재하지 않음`);
+          // 🔁 폴백: processingUid로 재조회 시도 (uid가 있으나 자격 없을 때도 처리)
+          try {
+            const sysSnap = await admin.firestore().collection('system').doc('settings').get();
+            const procUid = sysSnap.exists ? (sysSnap.data() as any)?.processingUid : null;
+            if (procUid && procUid !== uid) {
+              console.log(`🔁 [KISProxy] processingUid로 재조회: ${procUid}`);
+              return await this.getApiCredentials(procUid);
+            }
+          } catch (_) {}
         }
       }
       
@@ -94,6 +113,117 @@ export class KISProxy {
     } catch (error) {
       console.error('❌ API 자격 정보 조회 실패:', error);
       throw error;
+    }
+  }
+
+  /**
+   * 해외 주식 기본/검색 정보 조회 (overseas search-info)
+   * - 해외주식구분코드(ovrs_stck_dvsn_cd) 추출용
+   * - 01: 주식, 02: Warrant, 03: ETF, 04: 우선주
+   */
+  static async fetchOverseasSearchInfo(symbol: string, exchangeCode: string = 'NAS', uid?: string): Promise<{
+    ovrs_stck_dvsn_cd?: string;
+    exchangeCode?: string;
+    raw?: any;
+  } | null> {
+    try {
+      // 해외 심볼 판별: 영문 대문자 1~6자 (간단 가드)
+      if (!/^[A-Z.]{1,6}$/.test(symbol)) {
+        return null;
+      }
+
+      const token = await this.getAccessToken(uid);
+      const credentials = await this.getApiCredentials(uid);
+
+      const url = `https://openapi.koreainvestment.com:9443/uapi/overseas-price/v1/quotations/search-info?AUTH=&EXCD=${encodeURIComponent(exchangeCode)}&SYMB=${encodeURIComponent(symbol)}`;
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'authorization': `Bearer ${token}`,
+          'appkey': credentials.appKey,
+          'appsecret': credentials.appSecret,
+          'tr_id': 'HHDFS76200200',
+        },
+      });
+
+      if (!response.ok) {
+        const txt = await response.text();
+        console.log(`⚠️ [KISProxy] overseas search-info 실패 ${symbol}: ${response.status} ${txt.substring(0, 300)}`);
+        return null;
+      }
+
+      const data = await response.json() as any;
+      const out = data.output || data.output1 || data || {};
+      const typeCode = out.ovrs_stck_dvsn_cd || out.OVRS_STCK_DVSN_CD || '';
+
+      return { ovrs_stck_dvsn_cd: typeCode || undefined, exchangeCode, raw: out };
+    } catch (e) {
+      console.log(`⚠️ [KISProxy] overseas search-info 예외 ${symbol}:`, e);
+      return null;
+    }
+  }
+
+  /**
+   * 해외 주식 검색정보 조회 (EXCD 순회 폴백)
+   * - 기본 순서: NAS → NYS → HKS
+   */
+  static async fetchOverseasSearchInfoWithFallback(symbol: string, exchanges: string[] = ['NAS','NYS','HKS'], uid?: string) {
+    for (const ex of exchanges) {
+      const res = await this.fetchOverseasSearchInfo(symbol, ex, uid);
+      if (res && res.ovrs_stck_dvsn_cd) {
+        return res;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 국내 주식 기본/검색 정보 조회 (search-stock-info)
+   * - REITs/ETF 구분 코드(reits_kind_cd, etf_dvsn_cd) 수집용
+   */
+  static async fetchDomesticSearchInfo(symbol: string, uid?: string): Promise<{
+    reits_kind_cd?: string;
+    etf_dvsn_cd?: string;
+    raw?: any;
+  } | null> {
+    try {
+      // 국내주식 코드만 처리 (5~6자리 숫자)
+      if (!/^\d{5,6}$/.test(symbol)) {
+        return null;
+      }
+
+      const token = await this.getAccessToken(uid);
+      const credentials = await this.getApiCredentials(uid);
+
+      const url = `https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/search-stock-info?PDNO=${symbol}`;
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'authorization': `Bearer ${token}`,
+          'appkey': credentials.appKey,
+          'appsecret': credentials.appSecret,
+          'tr_id': 'CTPF1604R',
+        },
+      });
+
+      if (!response.ok) {
+        const txt = await response.text();
+        console.log(`⚠️ [KISProxy] search-stock-info 실패 ${symbol}: ${response.status} ${txt.substring(0, 300)}`);
+        return null;
+      }
+
+      const data = await response.json() as any;
+      // 응답 구조 가드: output 또는 output1 등 다양한 케이스 대비
+      const out = data.output || data.output1 || data || {};
+      const reits = out.reits_kind_cd || out.REITS_KIND_CD || '';
+      const etf = out.etf_dvsn_cd || out.ETF_DVSN_CD || '';
+
+      return { reits_kind_cd: reits || undefined, etf_dvsn_cd: etf || undefined, raw: out };
+    } catch (e) {
+      console.log(`⚠️ [KISProxy] search-stock-info 예외 ${symbol}:`, e);
+      return null;
     }
   }
 
@@ -262,8 +392,19 @@ export class KISProxy {
           market: 'KOSPI',
         };
       } else {
-        // 해외주식 현재가 조회 (1호가 API 사용 - 클라이언트와 동일)
-        const response = await fetch(`https://openapi.koreainvestment.com:9443/uapi/overseas-price/v1/quotations/inquire-asking-price?AUTH=&EXCD=NAS&SYMB=${symbol}`, {
+        // 해외주식 현재가 조회 (1호가 API) - exchangeCode 우선, 없으면 순회 폴백
+        let exchangeCode: string | null = null;
+        try {
+          const metaSnap = await admin.firestore().collection('stocks').doc(symbol).get();
+          exchangeCode = (metaSnap.data()?.meta?.exchangeCode || metaSnap.data()?.info?.meta?.exchangeCode || null) as string | null;
+        } catch (_) {}
+
+        const exchangeCandidates = exchangeCode ? [exchangeCode] : ['NAS','NYS','HKS'];
+
+        let lastErrorText = '';
+        let response: any = null;
+        for (const ex of exchangeCandidates) {
+          const tryResp = await fetch(`https://openapi.koreainvestment.com:9443/uapi/overseas-price/v1/quotations/inquire-asking-price?AUTH=&EXCD=${ex}&SYMB=${symbol}`, {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
@@ -273,11 +414,19 @@ export class KISProxy {
             'tr_id': 'HHDFS76200100', // 1호가 API TR_ID
           },
         });
+          if (!tryResp.ok) {
+            lastErrorText = await tryResp.text();
+            console.log(`⚠️ [KISProxy] 해외 현재가 실패(${ex}): ${tryResp.status} ${lastErrorText.substring(0,300)}`);
+            continue;
+          }
+          response = tryResp;
+          exchangeCode = ex;
+          break;
+        }
 
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.log(`❌ [KISProxy] 해외주식 현재가 조회 실패: ${response.status}`, errorText);
-          throw new Error(`해외주식 현재가 조회 실패: ${response.status}`);
+        if (!response) {
+          console.log(`❌ [KISProxy] 해외주식 현재가 조회 실패(전 거래소 실패): ${lastErrorText.substring(0,300)}`);
+          throw new Error('해외주식 현재가 조회 실패: all exchanges');
         }
 
         const data = await response.json() as any;
@@ -289,6 +438,11 @@ export class KISProxy {
         // 1호가 API의 경우 output1 (현재가), output2 (매수호가), output3 (매도호가) 사용
         const currentPrice = Number(output1.last) || Number(output1.bidp) || Number(output1.askp) || 0;
         const prevClose = Number(output1.base) || 0;
+        // 메타에 exchangeCode 없으면 저장 보강
+        try {
+          const docRef = admin.firestore().collection('stocks').doc(symbol);
+          await docRef.set({ meta: { exchangeCode, metaUpdated: new Date() } }, { merge: true });
+        } catch (_) {}
         
         return {
           symbol,
